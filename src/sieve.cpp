@@ -101,31 +101,50 @@ static std::vector<OcrLine> MergeSplitLines(const std::vector<OcrLine>& in) {
 }
 
 // 按纵向间距聚成区块；水平方向完全不相交时也断开（把侧栏和正文分开）
-static std::vector<Block> ClusterBlocks(const std::vector<OcrLine>& lines) {
-    std::vector<OcrLine> sorted = lines;
-    std::sort(sorted.begin(), sorted.end(), [](const OcrLine& a, const OcrLine& b) {
-        return a.box.y < b.box.y;
+static std::vector<Block> ClusterBlocks(const std::vector<OcrLine>& lines,
+                                        const std::vector<int>& winOf,
+                                        const std::vector<WinInfo>& wins) {
+    struct Tagged {
+        OcrLine line;
+        int     win;
+    };
+
+    std::vector<Tagged> sorted;
+    sorted.reserve(lines.size());
+    for (size_t i = 0; i < lines.size(); ++i) {
+        Tagged t;
+        t.line = lines[i];
+        t.win = (i < winOf.size()) ? winOf[i] : -1;
+        sorted.push_back(std::move(t));
+    }
+
+    // Group by window before anything else. Windows come in Z order, so the
+    // topmost window is emitted first. Lines not inside any window go last.
+    std::sort(sorted.begin(), sorted.end(), [](const Tagged& a, const Tagged& b) {
+        int za = (a.win < 0) ? 100000 : a.win;
+        int zb = (b.win < 0) ? 100000 : b.win;
+        if (za != zb) return za < zb;
+        return a.line.box.y < b.line.box.y;
     });
 
-    // 用中位行高做阈值基准
     std::vector<int> heights;
-    for (const auto& l : sorted) if (l.box.h > 0) heights.push_back(l.box.h);
+    for (const auto& t : sorted) if (t.line.box.h > 0) heights.push_back(t.line.box.h);
     int medH = 16;
     if (!heights.empty()) {
         std::sort(heights.begin(), heights.end());
         medH = heights[heights.size() / 2];
     }
 
-    // 阈值改成"自适应行间距"：先量出相邻两行的典型间距，
-    // 明显大于它的才认为换了一段。固定阈值会被小字号拉低，
-    // 结果每行都独立成块。
+    // Adaptive gap: measure the typical distance between neighbouring lines
+    // instead of using a fixed number.
     std::vector<int> gaps;
     for (size_t i = 1; i < sorted.size(); ++i) {
-        const auto& a = sorted[i - 1].box;
-        const auto& b = sorted[i].box;
+        if (sorted[i].win != sorted[i - 1].win) continue;
+        const RectI& a = sorted[i - 1].line.box;
+        const RectI& b = sorted[i].line.box;
         int l = (std::max)(a.x, b.x);
         int r = (std::min)(a.right(), b.right());
-        if (r - l <= 0) continue;          // 不同列，不参与统计
+        if (r - l <= 0) continue;
         int g = b.y - a.bottom();
         if (g >= 0) gaps.push_back(g);
     }
@@ -145,18 +164,25 @@ static std::vector<Block> ClusterBlocks(const std::vector<OcrLine>& lines) {
     std::vector<Block> blocks;
     Block cur;
     bool has = false;
-    for (const auto& l : sorted) {
-        bool startNew = !has;
-        if (has) {
+    int  curWin = -2;
+
+    for (const auto& t : sorted) {
+        const OcrLine& l = t.line;
+        bool startNew = !has || t.win != curWin;
+        if (has && !startNew) {
             int gap = l.box.y - cur.box.bottom();
             bool sameColumn = xOverlap(cur.box, l.box) > 0;
             if (gap > gapLimit || !sameColumn) startNew = true;
         }
+
         if (startNew) {
             if (has) blocks.push_back(std::move(cur));
             cur = Block{};
             cur.box = l.box;
             cur.items.push_back(LineItem{ l.text, l.box });
+            curWin = t.win;
+            cur.winZ = t.win;
+            if (t.win >= 0 && t.win < (int)wins.size()) cur.window = wins[t.win].title;
             has = true;
         } else {
             int right = (std::max)(cur.box.right(), l.box.right());
@@ -316,8 +342,16 @@ SieveResult SieveRun(const std::vector<OcrLine>& linesIn, const SieveOptions& op
     // 2) 归并
     std::vector<OcrLine> merged = MergeSplitLines(cleaned);
 
+    // Attribute each line to the window that actually covers it. This is real
+    // information from the OS, not a guess about geometry.
+    res.windows = EnumTopWindows();
+    std::vector<int> winOf(merged.size(), -1);
+    for (size_t i = 0; i < merged.size(); ++i) {
+        winOf[i] = WindowAtPoint(res.windows, merged[i].box.cx(), merged[i].box.cy());
+    }
+
     // 3) 聚块 + 判型
-    res.blocks = ClusterBlocks(merged);
+    res.blocks = ClusterBlocks(merged, winOf, res.windows);
     for (auto& b : res.blocks) Classify(b, screen);
 
     // 4) 排序：标题、对话框、工具栏优先，正文在后

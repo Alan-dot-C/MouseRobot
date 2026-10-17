@@ -309,6 +309,7 @@ static int CmdSee(const ArgList& args) {
             if (!firstBlock) s += L",";
             firstBlock = false;
             s += L"{\"kind\":\"" + b.kind + L"\"";
+            s += L",\"window\":\"" + FromUtf8(JsonEscape(ToUtf8(b.window))) + L"\"";
             s += L",\"box\":{\"x\":" + std::to_wstring(b.box.x) + L",\"y\":" + std::to_wstring(b.box.y);
             s += L",\"w\":" + std::to_wstring(b.box.w) + L",\"h\":" + std::to_wstring(b.box.h) + L"}";
             s += L",\"items\":[";
@@ -340,17 +341,61 @@ static int CmdSee(const ArgList& args) {
             contentParas.size(), sr.newLines, sr.goneLines);
     if (!focus.empty()) wprintf(L"[focus] %ls\n", focus.c_str());
 
-    for (const auto& b : sr.blocks) {
-        if (b.kind == L"content") continue;   // 正文统一在下面按段落输出
-        for (const auto& it : b.items) {
-            wprintf(L"[%ls] %ls @%d,%d %dx%d\n",
-                    b.kind.c_str(), it.text.c_str(),
-                    it.box.x, it.box.y, it.box.w, it.box.h);
+    // Output grouped by owning window. A window header is printed once, then
+    // its elements, then its body paragraphs. This is the structure the OS
+    // actually has, rather than something inferred from pixel distances.
+    {
+        // distinct windows in Z order
+        std::vector<int> zs;
+        for (const auto& b : sr.blocks) {
+            if (std::find(zs.begin(), zs.end(), b.winZ) == zs.end()) zs.push_back(b.winZ);
+        }
+        std::sort(zs.begin(), zs.end(), [](int a, int b) {
+            return (a < 0 ? 100000 : a) < (b < 0 ? 100000 : b);
+        });
+
+        int paraCount = 0;
+        for (int z : zs) {
+            std::wstring title;
+            for (const auto& b : sr.blocks) {
+                if (b.winZ == z && !b.window.empty()) { title = b.window; break; }
+            }
+            // Skip windows that have no recognised text, otherwise the output
+            // is full of empty headers for windows hidden behind others.
+            bool hasAny = false;
+            for (const auto& b : sr.blocks) if (b.winZ == z && !b.items.empty()) { hasAny = true; break; }
+            if (!hasAny) continue;
+
+            if (title.empty()) wprintf(L"[win] (桌面或不属于任何窗口)\n");
+            else wprintf(L"[win] %ls\n", title.c_str());
+
+            for (const auto& b : sr.blocks) {
+                if (b.winZ != z || b.kind == L"content") continue;
+                for (const auto& it : b.items) {
+                    wprintf(L"[%ls] %ls @%d,%d %dx%d\n",
+                            b.kind.c_str(), it.text.c_str(),
+                            it.box.x, it.box.y, it.box.w, it.box.h);
+                }
+            }
+
+            SieveResult sub;
+            for (const auto& b : sr.blocks)
+                if (b.winZ == z && b.kind == L"content") sub.blocks.push_back(b);
+            std::vector<LineItem> paras = BuildContentParagraphs(sub, 140);
+            for (const auto& p : paras) {
+                if (maxParas > 0 && paraCount >= maxParas) break;
+                wprintf(L"[content] %ls @%d,%d %dx%d\n",
+                        p.text.c_str(), p.box.x, p.box.y, p.box.w, p.box.h);
+                ++paraCount;
+            }
         }
     }
-    for (const auto& p : contentParas) {
-        wprintf(L"[content] %ls @%d,%d %dx%d\n",
-                p.text.c_str(), p.box.x, p.box.y, p.box.w, p.box.h);
+    if (!sr.windows.empty()) {
+        wprintf(L"[windows] %zu 个:\n", sr.windows.size());
+        for (const auto& w : sr.windows) {
+            wprintf(L"  z=%d %ls @%d,%d %dx%d\n",
+                    w.z, w.title.c_str(), w.rect.x, w.rect.y, w.rect.w, w.rect.h);
+        }
     }
 
     if (args.Has(L"--show-delta") && sr.changed) {

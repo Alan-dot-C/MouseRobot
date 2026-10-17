@@ -16,6 +16,7 @@
 
 #include "common.h"
 #include "eye.h"
+#include "winenum.h"
 #include <string>
 #include <vector>
 
@@ -28,6 +29,8 @@ struct Block {
     RectI                  box;
     std::vector<LineItem>  items;
     std::wstring           kind;    // title / toolbar / sidebar / content / status / dialog / button
+    std::wstring           window;  // owning window title, empty when unknown
+    int                    winZ = -1;
 };
 
 struct SieveOptions {
@@ -41,6 +44,7 @@ struct SieveOptions {
 
 struct SieveResult {
     std::vector<Block> blocks;
+    std::vector<WinInfo> windows;   // real window rectangles, in Z order
     int  newLines = 0;
     int  goneLines = 0;
     bool changed = false;
