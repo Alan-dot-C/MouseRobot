@@ -195,6 +195,8 @@ static int CmdSee(const ArgList& args) {
             }
         }
         bool changed = !havePrev || changedCells > 0;
+        LogV(L"感知", 3009, L"感知", L"屏幕指纹",
+             L"changed=%d cells=%d firstFrame=%d", changed ? 1 : 0, changedCells, havePrev ? 0 : 1);
 
         // Save the new grid for next time.
         {
@@ -282,7 +284,7 @@ static int CmdSee(const ArgList& args) {
                             h.text.c_str(), h.box.x, h.box.y, h.box.w, h.box.h, h.score,
                             (unsigned long)(GetTickCount() - start));
                 }
-                LogI(L"感知", 3011, L"感知", L"等待文字出现", L"query=%ls ms=%lu", waitText.c_str(), (unsigned long)(GetTickCount() - start));
+                LogI(L"感知", 3011, L"感知", L"等待文字出现", L"%ls ms=%lu", LogRedactText(waitText).c_str(), (unsigned long)(GetTickCount() - start));
                 return 0;
             }
             if ((int)(GetTickCount() - start) > timeoutMs) {
@@ -291,10 +293,12 @@ static int CmdSee(const ArgList& args) {
                             (unsigned long)(GetTickCount() - start));
                 else
                     wprintf(L"NOTFOUND\t超时 %dms\n", timeoutMs);
-                LogW(L"感知", 3010, L"感知", L"等待文字超时", L"query=%ls timeout=%d", waitText.c_str(), timeoutMs);
+                LogW(L"感知", 3010, L"感知", L"等待文字超时", L"%ls timeout=%d", LogRedactText(waitText).c_str(), timeoutMs);
                 return 1;
             }
             if (ShouldAbort()) {
+                LogW(L"动作", 4015, L"停止", L"动作被中止", L"stage=wait %ls",
+                     LogRedactText(waitText).c_str());
                 if (g_opt.json) {
                     JsonDoc d;
                     d.Bool(L"ok", false).Str(L"error", L"aborted");
@@ -336,6 +340,16 @@ static int CmdSee(const ArgList& args) {
     }
     LogV(L"感知", 3000, L"感知", L"截屏开始", L"x=%d y=%d w=%d h=%d scale=%d", region.x, region.y, region.w, region.h, r.scale);
     LogV(L"感知", 3002, L"感知", L"OCR 完成", L"raw=%zu ms=%lu", r.lines.size(), (unsigned long)msCapture);
+    {
+        // 分路统计：出问题时第一眼要能看出英文通道有没有跑、跑出多少行
+        int zhLines = 0, enLines = 0;
+        for (const auto& l : r.lines) {
+            if (l.src.rfind(L"en", 0) == 0) ++enLines;
+            else ++zhLines;
+        }
+        LogI(L"感知", 3012, L"感知", L"OCR 分路统计",
+             L"zh=%d en=%d raw=%zu ms=%lu", zhLines, enLines, r.lines.size(), (unsigned long)msCapture);
+    }
 
     // --raw：不做筛子，直接吐原始行
     if (args.Has(L"--raw")) {
@@ -388,10 +402,10 @@ static int CmdSee(const ArgList& args) {
         } else {
             if (hits.empty()) {
                 wprintf(L"NOTFOUND\t%ls\n", findText.c_str());
-                LogV(L"感知", 3005, L"感知", L"查找未命中", L"query=%ls", findText.c_str());
+                LogV(L"感知", 3005, L"感知", L"查找未命中", L"%ls", LogRedactText(findText).c_str());
                 return 1;
             }
-            LogI(L"感知", 3004, L"感知", L"查找命中", L"query=%ls hits=%zu best=%.2f", findText.c_str(), hits.size(), hits[0].score);
+            LogI(L"感知", 3004, L"感知", L"查找命中", L"%ls hits=%zu best=%.2f", LogRedactText(findText).c_str(), hits.size(), hits[0].score);
             for (const auto& h : hits) {
                 wprintf(L"HIT\t%ls\t%d\t%d\t%d\t%d\t%.2f\n",
                         h.text.c_str(), h.box.x, h.box.y, h.box.w, h.box.h, h.score);
@@ -415,10 +429,13 @@ static int CmdSee(const ArgList& args) {
     // 两者叠起来，模型既看得到自绘界面，也看得到真正的按钮名。
     std::vector<UiNode> uiNodes;
     if (args.Has(L"--ui") && UiInit()) {
+        DWORD t0 = GetTickCount();
         uiNodes = UiTree(nullptr,
                          args.GetInt(L"--ui-depth", 8),
                          args.GetInt(L"--ui-max", 300),
                          args.GetInt(L"--ui-timeout", 400));
+        LogI(L"感知", 3013, L"感知", L"UI 控件树",
+             L"nodes=%zu ms=%lu", uiNodes.size(), (unsigned long)(GetTickCount() - t0));
     }
 
     POINT cur = GetCursorPosNow();
@@ -691,6 +708,12 @@ static int CmdClickText(const ArgList& args) {
             }
         }
 
+        // 先记命中，dry-run 也留痕：出问题时"当时选中了什么"必须查得到
+        LogI(L"动作", 4014, L"动作", L"按文字点击命中",
+             L"%ls via=%ls x=%d y=%d score=%.2f dryRun=%d",
+             LogRedactText(h.text).c_str(), h.via.c_str(), h.box.cx(), h.box.cy(), h.score,
+             g_opt.dryRun ? 1 : 0);
+
         if (g_opt.dryRun) {
             std::wstring expectText = args.Get(L"--expect");
             std::wstring expectGone = args.Get(L"--expect-gone");
@@ -811,6 +834,9 @@ static int CmdClickText(const ArgList& args) {
         }
 
         if (timeout <= 0 || int(GetTickCount() - start) > timeout) {
+            LogV(L"感知", 3005, L"感知", L"查找未命中",
+                 L"%ls ms=%lu", LogRedactText(needle).c_str(),
+                 (unsigned long)(GetTickCount() - start));
             if (g_opt.json) {
                 JsonDoc d;
                 d.Bool(L"ok", false).Str(L"error", L"not found");
@@ -836,6 +862,7 @@ static int CmdUi(const ArgList& args) {
     std::wstring filter = args.Get(L"--text");
 
     auto nodes = UiTree(nullptr, depth, maxNodes, 1500);
+    LogV(L"感知", 3013, L"感知", L"UI 控件树", L"nodes=%zu ms=0", nodes.size());
     if (!filter.empty()) {
         std::vector<UiNode> keep;
         for (auto& n : nodes) if (n.name.find(filter) != std::wstring::npos) keep.push_back(n);
@@ -949,6 +976,8 @@ static int CmdReadText(const ArgList& args) {
         }
         return 1;
     }
+
+    LogI(L"感知", 3014, L"感知", L"读取文字", L"via=%ls chars=%zu", via.c_str(), text.size());
 
     if (g_opt.json) {
         JsonDoc d;

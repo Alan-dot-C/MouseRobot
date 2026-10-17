@@ -200,7 +200,12 @@ int CmdLogQuery(const std::vector<std::wstring>& rawArgs) {
     std::set<std::wstring> levels = SplitSet(a.Get(L"--level"));
     std::set<std::wstring> cats = SplitSet(a.Get(L"--cat"));
     std::set<std::wstring> sources = SplitSet(a.Get(L"--source"));
-    int idFilter = a.GetInt(L"--id", 0);
+    // --id 支持逗号分隔，和 --level 保持一致
+    std::set<int> idFilter;
+    for (const auto& part : Split(a.Get(L"--id"), L',')) {
+        std::wstring t = Trim(part);
+        if (!t.empty()) idFilter.insert(_wtoi(t.c_str()));
+    }
     std::wstring grep = a.Get(L"--grep");
     std::wstring since = SinceToStamp(a.Get(L"--since"));
     std::wstring from = SinceToStamp(a.Get(L"--from"));
@@ -219,7 +224,7 @@ int CmdLogQuery(const std::vector<std::wstring>& rawArgs) {
         }
         if (!cats.empty() && !cats.count(r.category)) continue;
         if (!sources.empty() && !sources.count(r.source)) continue;
-        if (idFilter && r.eventId != idFilter) continue;
+        if (!idFilter.empty() && !idFilter.count(r.eventId)) continue;
         if (!since.empty() && r.time < since) continue;
         if (!to.empty() && r.time > to) continue;
         if (!grep.empty()) {

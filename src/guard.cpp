@@ -89,7 +89,11 @@ int GuardVerify(const std::wstring& expectText,
                  expectText.c_str(), expectGone.c_str(), timeoutMs);
             return 5;
         }
-        if (ShouldAbort()) return 4;
+        if (ShouldAbort()) {
+            LogW(L"动作", 4015, L"停止", L"动作被中止", L"stage=verify %ls",
+                 LogRedactText(expectText).c_str());
+            return 4;
+        }
         Sleep(250);
     }
 }

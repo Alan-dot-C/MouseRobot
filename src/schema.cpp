@@ -106,7 +106,7 @@ static const OptSpec kPlayOpts[] = {
 static const OptSpec kLogOpts[] = {
     { L"--tail",    true,  L"最近 N 条" },
     { L"--level",   true,  L"级别过滤，逗号分隔" },
-    { L"--id",      true,  L"事件 ID 过滤" },
+    { L"--id",      true,  L"事件 ID 过滤，逗号分隔" },
     { L"--cat",     true,  L"任务类别过滤" },
     { L"--source",  true,  L"来源过滤" },
     { L"--since",   true,  L"最近一段时间，如 30m / 2h" },

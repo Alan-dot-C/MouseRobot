@@ -611,6 +611,9 @@ static const std::vector<LogEventDef> kCatalog = {
     { 3009, L"感知", L"感知",  L"屏幕指纹",            L"hash= distance= changed=" },
     { 3010, L"感知", L"感知",  L"等待文字超时",         L"query= timeout=" },
     { 3011, L"感知", L"感知",  L"等待文字出现",         L"query= ms=" },
+    { 3012, L"感知", L"感知",  L"OCR 分路统计",         L"zh= en= raw= ms=" },
+    { 3013, L"感知", L"感知",  L"UI 控件树",            L"nodes= ms=" },
+    { 3014, L"感知", L"感知",  L"读取文字",            L"via= chars= ms=" },
 
     // 4xxx 动作（手）
     { 4000, L"动作", L"动作",  L"移动鼠标",            L"x= y= ms=" },
@@ -627,6 +630,8 @@ static const std::vector<LogEventDef> kCatalog = {
     { 4011, L"动作", L"动作",  L"动作验证通过",          L"expect= expectGone= ms=" },
     { 4012, L"动作", L"动作",  L"动作验证超时",          L"expect= expectGone= timeout=" },
     { 4013, L"动作", L"异常",  L"危险动作被拦截",         L"text= word=" },
+    { 4014, L"动作", L"动作",  L"按文字点击命中",         L"text= via= x= y= score=" },
+    { 4015, L"动作", L"停止",  L"动作被中止",            L"stage= reason=" },
 
     // 5xxx 语音（嘴）
     { 5000, L"语音", L"语音",  L"播报开始",            L"chars= voice= rate= volume=" },
