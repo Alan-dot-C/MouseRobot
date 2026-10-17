@@ -2,6 +2,7 @@
 //  mouth.cpp —— 语音合成
 // ============================================================================
 #include "mouth.h"
+#include "log.h"
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -86,8 +87,11 @@ int MouthSpeak(const std::wstring& text,
     std::wstring body = Trim(text);
     if (body.empty()) {
         Say(L"ERR 文本为空");
+        LogW(L"语音", 5003, L"异常", L"语音引擎不可用", L"reason=empty-text");
         return 2;
     }
+    LogI(L"语音", 5000, L"语音", L"播报开始", L"chars=%zu voice=%ls rate=%d volume=%d wav=%ls",
+         body.size(), voice.empty() ? L"auto" : voice.c_str(), rate, volume, wavOut.c_str());
 
     try {
         SpeechSynthesizer synth = CreateSynth(voice);
@@ -126,6 +130,7 @@ int MouthSpeak(const std::wstring& text,
                 return 1;
             }
             Say(L"已导出 %ls (%zu 字节)", wavOut.c_str(), bytes.size());
+            LogI(L"语音", 5002, L"语音", L"导出 WAV", L"path=%ls bytes=%zu", wavOut.c_str(), bytes.size());
             return 0;
         }
 
@@ -155,10 +160,12 @@ int MouthSpeak(const std::wstring& text,
         player.Close();
 
         Say(L"播报完成 (%zu 字)", body.size());
+        LogI(L"语音", 5001, L"语音", L"播报完成", L"chars=%zu", body.size());
         return 0;
     } catch (hresult_error const& e) {
         std::wstring msg = e.message().c_str();
         Say(L"ERR 语音合成失败: %ls", msg.c_str());
+        LogE(L"语音", 5004, L"异常", L"语音合成失败", L"err=%ls", msg.c_str());
         return 1;
     } catch (...) {
         Say(L"ERR 语音合成未知异常");

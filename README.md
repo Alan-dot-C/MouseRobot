@@ -147,6 +147,89 @@ KEY ENTER
 handeye see --dry-run        # 只描述，不动手
 ```
 
+## 系统日志
+
+工具会把自己的每一次行为写进日志，格式和 Windows 事件日志同一套思路，也和本项目的安卓端
+`AppLog` 保持同一行格式。
+
+### 行格式
+
+```
+2026-10-17 18:18:13.225 | 信息 | 感知 | 3004 | 感知 | 查找命中 | [S=0d9a0 P=4692] query=DeepSeek hits=2 best=0.79
+2026-10-17 18:18:13.381 | 信息 | 动作 | 4002 | 动作 | 输入文字 | [S=5c146 P=22096] text="测试文本" len=4
+```
+
+字段固定七段：**时间 | 级别 | 来源 | 事件ID | 任务类别 | 描述 | 详细信息**
+
+- **级别**五档，对齐 Windows 的 1-5：`严重 / 错误 / 警告 / 信息 / 详细`
+- **事件 ID** 按来源分段：1xxx 核心、2xxx 崩溃、3xxx 感知、4xxx 动作、5xxx 语音、
+  6xxx 脚本、7xxx 配置、8xxx 会话
+- **详细信息**是 `key=value` 结构，不是一句话。开头 `[S=会话 P=进程]` 用于把一次任务里的
+  多次调用串起来
+
+### 存储
+
+```
+%LOCALAPPDATA%\handeye\logs\
+    handeye.log                      活动文件，超过 4 MB 就轮转
+    handeye_20261017_181909.log      轮转文件，文件名带时间戳
+    ...
+```
+
+保留最近 30 个文件，更旧的自动删除。轮转本身也会记一条 7002 事件。
+
+### 看日志
+
+```
+handeye log                      最近 30 条
+handeye log --last               只看上一次运行
+handeye log --level 错误,警告     按级别
+handeye log --id 4006            按事件 ID
+handeye log --cat 动作            按任务类别
+handeye log --source 感知         按来源
+handeye log --since 30m          最近半小时
+handeye log --grep 关键词
+handeye log --stats              按级别/来源/ID 统计
+handeye log --json               机器可读
+handeye log --follow             实时跟踪
+handeye log --export out.csv     导出（CSV 带 BOM，Excel 直接打开）
+handeye log --path               日志在哪里
+handeye log schema               事件目录：每个 ID 是什么意思
+handeye log --clear --yes        清空
+```
+
+### 配置
+
+配置文件 `%LOCALAPPDATA%\handeye\config.ini`：
+
+```ini
+dir=%LOCALAPPDATA%\handeye\logs
+level=详细
+text=full
+maxBytes=4194304
+keep=30
+enabled=1
+```
+
+也可以用环境变量覆盖：`HANDEYE_LOG_DIR`、`HANDEYE_LOG_LEVEL`、`HANDEYE_LOG_TEXT`、
+`HANDEYE_LOG`（0 关闭）、`HANDEYE_LOG_ECHO`（同时打到 stderr）。
+命令行参数优先级最高：`--log-dir`、`--log-level`、`--log-text`、`--no-log`、`--log-echo`。
+
+### 隐私
+
+默认把输入的文字原样记进日志。如果不希望这样：
+
+- `--log-text mask` 只记长度和首尾各一个字符
+- `--log-text off` 完全不记内容
+- 屏幕识别结果**从不记录具体文字**，只记行数、块数和耗时
+- 截图从不写进日志
+
+### 崩溃时的行为
+
+安装了未捕获异常钩子（SEH / C++ 异常 / CRT 无效参数）。崩溃时会写一条 `2000 严重` 事件，
+并把内存里最近 20 条事件一次性落盘——这就是"飞行记录器"，用来回答"退出前最后做了什么"。
+
+写盘在调用线程同步完成，不攒批。代价是每次多几毫秒，换来的是崩溃前最后一行一定在盘上。
 ## 编译
 
 需要 Visual Studio 的「使用 C++ 的桌面开发」工作负载（C++20 + Windows SDK）。

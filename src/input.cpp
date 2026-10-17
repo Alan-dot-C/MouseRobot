@@ -9,6 +9,7 @@
 //    - FOCUS 等窗口真正成为前台，而不是固定睡 500ms
 // ============================================================================
 #include "input.h"
+#include "log.h"
 
 #include <cstdio>
 #include <cstdarg>
@@ -41,7 +42,7 @@ struct Ev {
     uint32_t t;
 };
 
-static std::vector<Ev> g_log;
+static std::vector<Ev> g_recLog;
 static std::atomic<bool> g_recording{ false };
 static DWORD g_recStart = 0;
 static HHOOK g_mouseHook = nullptr;
@@ -120,6 +121,7 @@ static void SendMouseAbs(DWORD flags, int x, int y, int wheel = 0) {
 
 void MoveTo(int x, int y, DWORD msSmooth) {
     int tx = ClampX(x), ty = ClampY(y);
+    LogV(L"动作", 4000, L"动作", L"移动鼠标", L"x=%d y=%d ms=%lu", tx, ty, (unsigned long)msSmooth);
     if (g_opt.dryRun) { Say(L"[dry-run] MOVE %d %d", tx, ty); return; }
     POINT cur;
     GetCursorPos(&cur);
@@ -147,6 +149,7 @@ void ClickNow(bool right) {
     if (g_opt.dryRun) { Say(L"[dry-run] CLICK"); return; }
     POINT p;
     GetCursorPos(&p);
+    LogI(L"动作", 4001, L"动作", L"点击", L"x=%d y=%d btn=%ls", p.x, p.y, right ? L"R" : L"L");
     DWORD down = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
     DWORD up = right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
     SendMouseAbs(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | down, p.x, p.y);
@@ -187,6 +190,7 @@ void LeftButton(bool down) {
 }
 
 void HoldKey(int vk, bool down) {
+    LogV(L"动作", 4004, L"动作", L"按住/释放", L"vk=0x%02X down=%d", vk, down ? 1 : 0);
     if (g_opt.dryRun) { Say(L"[dry-run] KEY %d %ls", vk, down ? L"DOWN" : L"UP"); return; }
     INPUT in{};
     in.type = INPUT_KEYBOARD;
@@ -197,6 +201,7 @@ void HoldKey(int vk, bool down) {
 }
 
 void PressKey(int vk, bool extended) {
+    LogI(L"动作", 4003, L"动作", L"按键", L"vk=0x%02X ext=%d", vk, extended ? 1 : 0);
     if (g_opt.dryRun) { Say(L"[dry-run] PRESS %d", vk); return; }
     INPUT in[2]{};
     in[0].type = INPUT_KEYBOARD;
@@ -223,6 +228,7 @@ static void TypeUnicode(wchar_t ch) {
 }
 
 bool TypeText(const std::wstring& text, int charDelayMs) {
+    LogI(L"动作", 4002, L"动作", L"输入文字", L"%ls len=%zu", LogRedactText(text).c_str(), text.size());
     if (g_opt.dryRun) { Say(L"[dry-run] TEXT %ls", text.c_str()); return true; }
     for (wchar_t c : text) {
         TypeUnicode(c);
@@ -299,6 +305,7 @@ bool PressKeyCombo(const std::wstring& combo) {
         }
     }
     if (keys.empty()) return false;
+    LogI(L"动作", 4003, L"动作", L"按键", L"combo=%ls keys=%zu mods=%d", combo.c_str(), keys.size(), mods);
     if (g_opt.dryRun) { Say(L"[dry-run] COMBO %ls", combo.c_str()); return true; }
 
     std::vector<INPUT> in;
@@ -362,7 +369,10 @@ bool FocusWindow(const std::wstring& needle, DWORD waitMs) {
         Sleep(100);
     } while (GetTickCount() - start < 1500);
 
-    if (!h) return false;
+    if (!h) {
+        LogW(L"动作", 4005, L"动作", L"切换窗口", L"target=%ls ok=0 reason=not-found", needle.c_str());
+        return false;
+    }
     ShowWindow(h, SW_RESTORE);
     SetForegroundWindow(h);
 
@@ -372,7 +382,11 @@ bool FocusWindow(const std::wstring& needle, DWORD waitMs) {
         if (ShouldAbort()) break;
         Sleep(20);
     }
-    return GetForegroundWindow() == h;
+    bool ok = (GetForegroundWindow() == h);
+    wchar_t title[256] = {};
+    GetWindowTextW(h, title, 255);
+    LogI(L"动作", 4005, L"动作", L"切换窗口", L"target=%ls title=%ls ok=%d", needle.c_str(), title, ok ? 1 : 0);
+    return ok;
 }
 
 bool WaitForWindow(const std::wstring& needle, DWORD timeoutMs) {
@@ -561,6 +575,7 @@ int RunScriptFile(const std::wstring& path) {
         return 2;
     }
     Say(L"执行脚本: %ls", path.c_str());
+    LogI(L"脚本", 6000, L"脚本", L"脚本开始", L"path=%ls", path.c_str());
     if (g_stopEvent) ResetEvent(g_stopEvent);
     g_vars.clear();
     g_progStart = GetTickCount();
@@ -580,20 +595,22 @@ int RunScriptFile(const std::wstring& path) {
         }
         if (!RunScriptLine(line, lineNo)) {
             Say(L"脚本在第 %d 行失败, 已中止", lineNo);
+            LogE(L"脚本", 6002, L"异常", L"脚本行失败", L"line=%d cmd=%ls", lineNo, line.c_str());
             return 3;
         }
     }
     Say(L"脚本执行完毕。");
+    LogI(L"脚本", 6003, L"脚本", L"脚本完成", L"ok=1 lines=%d ms=%lu", lineNo, (unsigned long)(GetTickCount() - g_progStart));
     return 0;
 }
 
 // ------------------------------ 录制 ------------------------------
 
 static void PushEvent(const Ev& e) {
-    bool merge = (e.type == EV_MOVE && !g_log.empty() &&
-                  g_log.back().type == EV_MOVE && e.t - g_log.back().t < 15);
-    if (merge) g_log.back() = e;
-    else g_log.push_back(e);
+    bool merge = (e.type == EV_MOVE && !g_recLog.empty() &&
+                  g_recLog.back().type == EV_MOVE && e.t - g_recLog.back().t < 15);
+    if (merge) g_recLog.back() = e;
+    else g_recLog.push_back(e);
 }
 
 static void PushKey(int vk) {
@@ -675,10 +692,10 @@ static bool SaveLog(const std::wstring& path) {
     uint32_t hdr[5] = { kRecMagic, kRecVersion,
                         uint32_t(GetSystemMetrics(SM_CXSCREEN)),
                         uint32_t(GetSystemMetrics(SM_CYSCREEN)),
-                        uint32_t(g_log.size()) };
+                        uint32_t(g_recLog.size()) };
     bool ok = (fwrite(hdr, sizeof(uint32_t), 5, f) == 5);
-    if (ok && !g_log.empty())
-        ok = (fwrite(g_log.data(), sizeof(Ev), g_log.size(), f) == g_log.size());
+    if (ok && !g_recLog.empty())
+        ok = (fwrite(g_recLog.data(), sizeof(Ev), g_recLog.size(), f) == g_recLog.size());
     if (fclose(f) != 0) ok = false;
     return ok;
 }
@@ -719,12 +736,12 @@ static bool LoadLog(const std::wstring& path) {
     }
     if (count > 10000000) { fclose(f); Say(L"事件数异常"); return false; }
 
-    g_log.resize(count);
+    g_recLog.resize(count);
     if (count) {
-        size_t got = fread(g_log.data(), sizeof(Ev), count, f);
+        size_t got = fread(g_recLog.data(), sizeof(Ev), count, f);
         if (got != count) {
             fclose(f);
-            g_log.clear();
+            g_recLog.clear();
             Say(L"录制文件被截断 (声明 %u，实际 %zu)", count, got);
             return false;
         }
@@ -774,7 +791,7 @@ int DoRecord(const std::wstring& path, bool autoStart) {
         return 3;
     }
     if (autoStart) {
-        g_log.clear();
+        g_recLog.clear();
         g_recStart = GetTickCount();
         g_recording = true;
         Say(L"[REC] 已开始，按 ScrollLock 停止，Esc 保存退出");
@@ -796,9 +813,9 @@ int DoRecord(const std::wstring& path, bool autoStart) {
             if (vk == VK_SCROLL) {
                 if (g_recording) {
                     g_recording = false;
-                    Say(L"[REC] 停止，共 %zu 个事件", g_log.size());
+                    Say(L"[REC] 停止，共 %zu 个事件", g_recLog.size());
                 } else {
-                    g_log.clear();
+                    g_recLog.clear();
                     g_recStart = GetTickCount();
                     g_recording = true;
                     Say(L"[REC] 开始");
@@ -812,8 +829,8 @@ int DoRecord(const std::wstring& path, bool autoStart) {
     if (g_keyHook) { UnhookWindowsHookEx(g_keyHook); g_keyHook = nullptr; }
 
     if (!SaveLog(path)) { Say(L"保存失败: %ls", path.c_str()); return 2; }
-    Say(L"已保存 %zu 个事件到 %ls", g_log.size(), path.c_str());
-    if (g_log.empty()) {
+    Say(L"已保存 %zu 个事件到 %ls", g_recLog.size(), path.c_str());
+    if (g_recLog.empty()) {
         Say(L"警告: 录制结果是 0 个事件，文件是空的（是否忘记按 ScrollLock？）");
         return 3;
     }
@@ -821,9 +838,9 @@ int DoRecord(const std::wstring& path, bool autoStart) {
 }
 
 static bool PlayOnce() {
-    if (g_log.empty()) return true;
+    if (g_recLog.empty()) return true;
     DWORD start = GetTickCount();
-    for (const auto& e : g_log) {
+    for (const auto& e : g_recLog) {
         if (ShouldAbort()) return false;
         for (;;) {
             DWORD el = GetTickCount() - start;
@@ -839,10 +856,10 @@ static bool PlayOnce() {
 
 int DoPlay(const std::wstring& path, int loop) {
     if (!LoadLog(path)) return 2;
-    if (g_log.empty()) { Say(L"文件里没有事件"); return 3; }
+    if (g_recLog.empty()) { Say(L"文件里没有事件"); return 3; }
     if (g_stopEvent) ResetEvent(g_stopEvent);
     g_progStart = GetTickCount();
-    Say(L"回放 %zu 个事件 (循环 %d 次)", g_log.size(), loop);
+    Say(L"回放 %zu 个事件 (循环 %d 次)", g_recLog.size(), loop);
     int done = 0;
     for (int i = 0; loop <= 0 || i < loop; ++i) {
         if (ShouldAbort()) break;
@@ -860,13 +877,14 @@ int DoStop() {
     SetEvent(ev);
     CloseHandle(ev);
     Say(L"已发送停止信号");
+    LogI(L"脚本", 6009, L"停止", L"收到停止信号", L"");
     return 0;
 }
 
 int DoDump(const std::wstring& path) {
     if (!LoadLog(path)) return 2;
-    Say(L"共 %zu 个事件", g_log.size());
-    for (const auto& e : g_log) {
+    Say(L"共 %zu 个事件", g_recLog.size());
+    for (const auto& e : g_recLog) {
         const wchar_t* name = L"?";
         switch (e.type) {
         case EV_MOVE: name = L"MOVE"; break;

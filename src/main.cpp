@@ -16,6 +16,8 @@
 #include "sieve.h"
 #include "input.h"
 #include "mouth.h"
+#include "log.h"
+#include "logquery.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -81,6 +83,7 @@ static bool ParseRect(const std::wstring& s, RectI& out) {
 }
 
 static std::vector<LineItem> BuildContentParagraphs(const SieveResult& sr, int maxChars);
+static int Dispatch(const ArgList& args, const std::wstring& cmd);
 
 // ------------------------------ 屏幕指纹状态 ------------------------------
 
@@ -144,6 +147,7 @@ static int CmdSee(const ArgList& args) {
         } else {
             wprintf(L"ERR 没有可用的 OCR 引擎（可能没装中文 OCR 语言包）\n");
         }
+        LogE(L"感知", 3006, L"异常", L"OCR 引擎不可用", L"reason=no-engine");
         return 3;
     }
 
@@ -174,6 +178,7 @@ static int CmdSee(const ArgList& args) {
                             h.text.c_str(), h.box.x, h.box.y, h.box.w, h.box.h, h.score,
                             (unsigned long)(GetTickCount() - start));
                 }
+                LogI(L"感知", 3011, L"感知", L"等待文字出现", L"query=%ls ms=%lu", waitText.c_str(), (unsigned long)(GetTickCount() - start));
                 return 0;
             }
             if ((int)(GetTickCount() - start) > timeoutMs) {
@@ -182,6 +187,7 @@ static int CmdSee(const ArgList& args) {
                             (unsigned long)(GetTickCount() - start));
                 else
                     wprintf(L"NOTFOUND\t超时 %dms\n", timeoutMs);
+                LogW(L"感知", 3010, L"感知", L"等待文字超时", L"query=%ls timeout=%d", waitText.c_str(), timeoutMs);
                 return 1;
             }
             Sleep(200);
@@ -196,8 +202,11 @@ static int CmdSee(const ArgList& args) {
         }
     }
 
+    DWORD tCapture = GetTickCount();
     OcrResult r = EyeCaptureAndOcr(region, scale);
+    DWORD msCapture = GetTickCount() - tCapture;
     if (!r.ok) {
+        LogE(L"感知", 3008, L"异常", L"截屏失败", L"err=%ls ms=%lu", r.error.c_str(), (unsigned long)msCapture);
         if (g_opt.json) {
             std::string esc = JsonEscape(ToUtf8(r.error));
             wprintf(L"{\"ok\":false,\"error\":\"%hs\"}\n", esc.c_str());
@@ -206,6 +215,8 @@ static int CmdSee(const ArgList& args) {
         }
         return 3;
     }
+    LogV(L"感知", 3000, L"感知", L"截屏开始", L"x=%d y=%d w=%d h=%d scale=%d", region.x, region.y, region.w, region.h, r.scale);
+    LogV(L"感知", 3002, L"感知", L"OCR 完成", L"raw=%zu ms=%lu", r.lines.size(), (unsigned long)msCapture);
 
     // --raw：不做筛子，直接吐原始行
     if (args.Has(L"--raw")) {
@@ -251,7 +262,12 @@ static int CmdSee(const ArgList& args) {
             s += L"]}\n";
             wprintf(L"%ls", s.c_str());
         } else {
-            if (hits.empty()) { wprintf(L"NOTFOUND\t%ls\n", findText.c_str()); return 1; }
+            if (hits.empty()) {
+                wprintf(L"NOTFOUND\t%ls\n", findText.c_str());
+                LogV(L"感知", 3005, L"感知", L"查找未命中", L"query=%ls", findText.c_str());
+                return 1;
+            }
+            LogI(L"感知", 3004, L"感知", L"查找命中", L"query=%ls hits=%zu best=%.2f", findText.c_str(), hits.size(), hits[0].score);
             for (const auto& h : hits) {
                 wprintf(L"HIT\t%ls\t%d\t%d\t%d\t%d\t%.2f\n",
                         h.text.c_str(), h.box.x, h.box.y, h.box.w, h.box.h, h.score);
@@ -269,6 +285,7 @@ static int CmdSee(const ArgList& args) {
     so.dropUnchanged = args.Has(L"--changed-only");
 
     SieveResult sr = SieveRun(r.lines, so);
+    LogV(L"感知", 3003, L"感知", L"筛子完成", L"blocks=%zu raw=%zu", sr.blocks.size(), r.lines.size());
 
     POINT cur = GetCursorPosNow();
     std::wstring focus = GetForegroundTitle();
@@ -554,17 +571,68 @@ int wmain(int argc, wchar_t** argv) {
     ArgList args;
     for (int i = 1; i < argc; ++i) args.raw.push_back(argv[i]);
 
-    if (args.raw.empty()) { PrintUsage(); return 0; }
-
-    std::wstring cmd = args.raw[0];
-    for (wchar_t& c : cmd) c = towlower(c);
+    // 先起日志，再处理任何东西 —— 参数错误也要留痕
+    LogInit();
+    {
+        bool hasLevel = args.Has(L"--log-level");
+        bool hasText = args.Has(L"--log-text");
+        bool hasDir = args.Has(L"--log-dir");
+        int textMode = g_log.textMode;
+        std::wstring tv = ToUpper(args.Get(L"--log-text"));
+        if (tv == L"MASK") textMode = LOG_TEXT_MASK;
+        else if (tv == L"OFF") textMode = LOG_TEXT_OFF;
+        else if (tv == L"FULL") textMode = LOG_TEXT_FULL;
+        LogConfigure(hasDir, args.Get(L"--log-dir"),
+                     hasLevel, LogLevelFromName(args.Get(L"--log-level")),
+                     hasText, textMode,
+                     args.Has(L"--no-log"), false);
+        if (args.Has(L"--log-echo")) g_log.echoToStderr = true;
+    }
 
     g_opt.json = args.Has(L"--json");
     g_opt.dryRun = args.Has(L"--dry-run");
     g_opt.maxDurationSec = args.GetInt(L"--max-duration", 0);
 
+    if (args.raw.empty()) {
+        PrintUsage();
+        LogShutdown();
+        return 0;
+    }
+
+    std::wstring cmd = args.raw[0];
+    for (wchar_t& c : cmd) c = towlower(c);
+
+    // 会话开始：把完整命令行记下来，事后能复原"AI 到底调了什么"
+    {
+        std::wstring argvJoin;
+        for (size_t i = 0; i < args.raw.size(); ++i) {
+            if (i) argvJoin += L" ";
+            argvJoin += args.raw[i];
+        }
+        if (argvJoin.size() > 400) argvJoin = argvJoin.substr(0, 400) + L"…";
+        wchar_t cwd[MAX_PATH] = {};
+        GetCurrentDirectoryW(MAX_PATH, cwd);
+        LogI(L"会话", 8000, L"会话", L"会话开始", L"argv=\"%ls\" cwd=%ls",
+             argvJoin.c_str(), cwd);
+    }
+
+    int rc = Dispatch(args, cmd);
+
+    {
+        DWORD ms = GetTickCount() - LogStartTick();
+        if (rc == 0)
+            LogI(L"会话", 8001, L"会话", L"会话结束", L"rc=0 ms=%lu", (unsigned long)ms);
+        else
+            LogW(L"会话", 8001, L"会话", L"会话结束", L"rc=%d ms=%lu", rc, (unsigned long)ms);
+    }
+    LogShutdown();
+    return rc;
+}
+
+static int Dispatch(const ArgList& args, const std::wstring& cmd) {
     if (cmd == L"help" || cmd == L"--help" || cmd == L"-h") { PrintUsage(); return 0; }
     if (cmd == L"schema") { PrintSchema(); return 0; }
+    if (cmd == L"log")   return CmdLogQuery(args.raw);
     if (cmd == L"see") return CmdSee(args);
     if (cmd == L"click-text" || cmd == L"clicktext") return CmdClickText(args);
 
