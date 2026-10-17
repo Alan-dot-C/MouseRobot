@@ -1,7 +1,13 @@
 // ============================================================================
 //  eye.h —— 眼睛：截屏 + OCR
 //
-//  纯 C++ 实现（C++/WinRT 调用系统自带 OCR），不依赖 .NET 或 PowerShell。
+//  纯 C++/WinRT 调用系统自带 OCR，不依赖 .NET 或 PowerShell。
+//
+//  识别策略（2026-10-17 重构，依据实测）：
+//    - 中文小字在 1x 下最好，放大反而会把相邻的词并掉/丢掉
+//    - 英文和数字相反，放大 2~3 倍明显更准
+//    - 本机同时装了 zh-Hans-CN 与 en-GB 两个引擎，按行选路能各取所长
+//    - 裁切必须留白：没有留白的裁片会让引擎直接返回 0 行
 // ============================================================================
 #pragma once
 
@@ -11,8 +17,10 @@
 
 struct OcrLine {
     std::wstring text;
-    RectI        box;      // 已经是真实屏幕坐标
+    RectI        box;          // 已经是真实屏幕坐标
     int          words = 0;
+    double       quality = 1.0;// 0..1，越低越可能是乱码/丢词
+    std::wstring src;          // zh1x / en2x / en3x / zh4x ...
 };
 
 struct OcrResult {
@@ -21,7 +29,16 @@ struct OcrResult {
     std::wstring          error;
     std::vector<OcrLine>  lines;
     RectI                 region;    // 实际识别的屏幕区域
-    int                   scale = 1; // 送 OCR 前的放大倍数
+    int                   scale = 1; // 主通道用的放大倍数
+};
+
+struct OcrRequest {
+    RectI        region;            // 空 = 全屏
+    int          scale = 0;         // 0 = auto；>0 表示强制用这个倍数、只跑一路
+    std::wstring lang = L"auto";    // auto / zh / en
+    int          padPx = 12;        // 裁切留白（只对 --region 有意义）
+    bool         merge = true;      // auto 时是否跑第二路（拉丁/数字）
+    bool         secondLook = false;// 可疑行是否再认一遍
 };
 
 // 初始化 WinRT（进程内只需调用一次）
@@ -32,26 +49,23 @@ bool EyeInit();
 void EyeSetTimeout(int ms);
 int  EyeGetTimeout();
 
-// 截取屏幕区域并识别。region 为空表示整屏。
-// scale 为送 OCR 前的放大倍数，小字需要更大（默认 2）。
+// 识别一块屏幕。这是主入口。
+OcrResult EyeRecognize(const OcrRequest& req);
+
+// 兼容旧调用：单路识别，指定放大倍数。
 OcrResult EyeCaptureAndOcr(const RectI& region, int scale);
 
-// 直接识别内存里的 BGRA 像素（自上而下，32bpp）。
-// 测量工具用它：自己画图、自己缩放、自己预处理，绕开截屏。
+// 直接识别内存里的 BGRA 像素（自上而下，32bpp）——测量工具用。
 OcrResult EyeOcrPixels(const void* bgra, int w, int h);
 
 // 只截屏存 PNG（调试用）
 bool EyeSavePng(const std::wstring& path, const RectI& region);
 
 // 屏幕指纹：把区域缩到 9x8 灰度算 dHash，返回 64 位。
-// 用来判断"屏幕变了没有"，比比对 OCR 文本稳得多。
 uint64_t EyeScreenHash(const RectI& region);
-
-// 两个指纹差多少位（0 = 完全一样）
 int HashDistance(uint64_t a, uint64_t b);
 
-// Coarse luminance grid (gw x gh). Each cell is one averaged pixel, so a
-// 48x30 grid is only 1440 bytes and is enough to locate "what changed".
+// 粗网格（gw x gh），每格一个平均亮度，用来定位"哪里变了"
 bool EyeCoarseGrid(int gw, int gh, std::vector<uint8_t>& cells, const RectI& region = RectI{});
 
 // 主屏尺寸

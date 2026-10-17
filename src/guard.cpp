@@ -53,7 +53,10 @@ void GuardAnnounce(const std::wstring& text) {
 // ------------------------------ verify ------------------------------
 
 static bool ScreenContains(const std::wstring& needle, int scale) {
-    OcrResult r = EyeCaptureAndOcr(RectI{}, scale);
+    OcrRequest req;
+    req.scale = scale > 0 ? scale : 0;   // 0 = auto
+    req.merge = true;
+    OcrResult r = EyeRecognize(req);
     if (!r.ok) return false;
     auto hits = SieveFind(r.lines, needle, 1);
     return !hits.empty();
@@ -65,7 +68,7 @@ int GuardVerify(const std::wstring& expectText,
                 int scale) {
     if (expectText.empty() && expectGone.empty()) return 0;
     if (timeoutMs <= 0) timeoutMs = 3000;
-    if (scale < 1) scale = 2;
+    if (scale < 0) scale = 0;
 
     DWORD start = GetTickCount();
     for (;;) {

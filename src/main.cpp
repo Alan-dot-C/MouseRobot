@@ -103,6 +103,28 @@ static std::wstring ResolveStateKey(const ArgList& args, const RectI& region) {
 
 // ------------------------------ see ------------------------------
 
+// 把命令行开关翻译成一次识别请求。
+// 默认 auto：中文走 1x，拉丁/数字行再跑一路英文；--fast 只跑中文 1x。
+static OcrRequest BuildOcrRequest(const ArgList& args, const RectI& region) {
+    OcrRequest req;
+    req.region = region;
+
+    std::wstring sv = ToUpper(args.Get(L"--scale"));
+    if (sv == L"1") req.scale = 1;
+    else if (sv == L"2") req.scale = 2;
+    else if (sv == L"3") req.scale = 3;
+    else req.scale = 0;
+
+    if (args.Has(L"--fast")) req.scale = 1;
+
+    req.lang = args.Get(L"--lang", L"auto");
+    if (req.lang.empty()) req.lang = L"auto";
+    req.padPx = args.GetInt(L"--pad", 8);
+    req.merge = !args.Has(L"--fast") && req.scale == 0;
+    req.secondLook = args.Has(L"--best");
+    return req;
+}
+
 static int CmdSee(const ArgList& args) {
     RectI region{};
     std::wstring regionStr = args.Get(L"--region");
@@ -227,8 +249,7 @@ static int CmdSee(const ArgList& args) {
         return 3;
     }
 
-    int scale = args.GetInt(L"--scale", 2);
-    if (scale < 1) scale = 1;
+    OcrRequest oreq = BuildOcrRequest(args, region);
 
     // --wait：轮询直到文字出现
     std::wstring waitText = args.Get(L"--wait");
@@ -237,7 +258,7 @@ static int CmdSee(const ArgList& args) {
     if (!waitText.empty()) {
         DWORD start = GetTickCount();
         for (;;) {
-            OcrResult r = EyeCaptureAndOcr(region, scale);
+            OcrResult r = EyeRecognize(oreq);
             if (!r.ok) {
                 wprintf(L"ERR %ls\n", r.error.c_str());
                 return 3;
@@ -283,7 +304,7 @@ static int CmdSee(const ArgList& args) {
     }
 
     DWORD tCapture = GetTickCount();
-    OcrResult r = EyeCaptureAndOcr(region, scale);
+    OcrResult r = EyeRecognize(oreq);
     DWORD msCapture = GetTickCount() - tCapture;
     if (!r.ok) {
         LogE(L"感知", r.timedOut ? 3007 : 3008, L"异常",
@@ -580,13 +601,13 @@ static int CmdClickText(const ArgList& args) {
     }
     if (!EyeInit()) { wprintf(L"ERR 没有可用的 OCR 引擎\n"); return 3; }
 
-    int scale = args.GetInt(L"--scale", 2);
+    OcrRequest oreq = BuildOcrRequest(args, RectI{});
     int timeout = args.GetInt(L"--timeout", 0);
     int wanted = args.GetInt(L"--index", 0);
     DWORD start = GetTickCount();
 
     for (;;) {
-        OcrResult r = EyeCaptureAndOcr(RectI{}, scale);
+        OcrResult r = EyeRecognize(oreq);
         if (!r.ok) { wprintf(L"ERR %ls\n", r.error.c_str()); return 3; }
 
         auto hits = SieveFind(r.lines, needle, 8);
@@ -662,7 +683,7 @@ static int CmdClickText(const ArgList& args) {
             std::wstring expectGone2 = args.Get(L"--expect-gone");
             if (!expectText2.empty() || !expectGone2.empty()) {
                 int vt = args.GetInt(L"--expect-timeout", 3000);
-                int rc = GuardVerify(expectText2, expectGone2, vt, scale);
+                int rc = GuardVerify(expectText2, expectGone2, vt, 0);
                 if (rc != 0) {
                     wprintf(L"VERIFY-FAILED\texpect=%ls expectGone=%ls timeout=%dms\n",
                             expectText2.c_str(), expectGone2.c_str(), vt);

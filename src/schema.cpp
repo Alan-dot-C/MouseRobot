@@ -25,7 +25,7 @@ static const OptSpec kSeeOpts[] = {
     { L"--region",       true,  L"只识别这一块区域 x,y,w,h" },
     { L"--scale",        true,  L"送 OCR 前的放大倍数：auto(默认) / 1 / 2 / 3" },
     { L"--lang",         true,  L"识别引擎：auto(默认，按行选) / zh / en" },
-    { L"--pad",          true,  L"裁切时四周留白像素（默认 12）" },
+    { L"--pad",          true,  L"裁切时四周留白像素（默认 8）" },
     { L"--fast",         false, L"只跑中文 1x，最快；轮询用这个" },
     { L"--best",         false, L"双引擎合并 + 可疑行二次识别，最准" },
     { L"--all",          false, L"不做显著性裁剪，输出全部" },
