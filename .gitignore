@@ -1,0 +1,67 @@
+# ============================================================
+#  mouse_robot / 手嘴眼 工具目录 —— .gitignore
+#
+#  原则（与工作区一致）：只收"人写的东西"，不收"机器生成的东西"。
+#  判断标准：这个文件能不能重新生成？能 → 不收。
+# ============================================================
+
+# ---- 编译产物：都能重新编译出来 ----
+mouse_robot.exe
+OcrHelper.dll
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.recipe
+*.tlog
+*.idb
+*.lastbuildstate
+*.log
+x64/
+Debug/
+Release/
+
+# ---- 运行时数据：每次运行都在变，提交没有意义 ----
+robot.log
+speak.log
+*.rec
+_screen*.png
+screen*.png
+
+# ---- 临时的 .NET 编译产物（Roslyn 会用）----
+obj/
+bin/
+project.assets.json
+project.nuget.cache
+
+# ---- 网页缓存：从网上下载的，可重新下载 ----
+as_page.html
+as_page3.html
+as_updates.xml
+
+# ---- 凭据类：无条件排除，哪怕现在没有 ----
+*.key
+*.p12
+*.pfx
+*.pem
+id_rsa*
+.env
+credentials*
+secrets*
+
+# ---- 编辑器/系统杂项 ----
+.vs/
+.vscode/
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*~
+*.tmp
+*.bak
+
+# ---- 备份目录本身不重复入库 ----
+backup/
+
+# ---- 图标文件：第三方资源，不入库 ----
+*.ico
