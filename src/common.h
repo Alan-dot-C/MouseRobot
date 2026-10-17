@@ -67,6 +67,7 @@ struct Options {
     bool dryRun = false;
     bool noIcon = false;
     bool autoStart = false;
+    bool announce = false;      // speak before acting
     int  maxDurationSec = 0;
 };
 

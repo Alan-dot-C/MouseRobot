@@ -19,6 +19,7 @@
 #include "log.h"
 #include "logquery.h"
 #include "bench.h"
+#include "guard.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -36,6 +37,7 @@ static bool IsValueFlag(const std::wstring& s) {
         L"--region", L"--scale", L"--max-lines", L"--max-chars", L"--max-paras",
         L"--timeout", L"--find", L"--wait", L"--save", L"--voice", L"--rate",
         L"--volume", L"--wav", L"--loop", L"--max-duration", L"--icon",
+        L"--expect", L"--expect-gone", L"--expect-timeout", L"--index",
     };
     for (auto f : flags) if (s == f) return true;
     return false;
@@ -448,16 +450,46 @@ static int CmdClickText(const ArgList& args) {
             if (idx < 0 || idx >= int(hits.size())) idx = 0;
             const auto& h = hits[idx];
 
+            // Danger guard. A tool that can click anything needs a brake.
+            // Dry-run still previews, but says out loud that a real run
+            // would be blocked.
+            std::wstring dangerWord;
+            bool dangerous = GuardIsDangerous(h.text, dangerWord);
+            bool confirmed = args.Has(L"--yes");
+            if (dangerous && !confirmed) {
+                if (g_opt.dryRun) {
+                    wprintf(L"[dry-run] 注意：目标含危险词「%ls」，正式执行会被拦截，需要加 --yes\n",
+                            dangerWord.c_str());
+                } else {
+                    wprintf(L"BLOCKED\t目标含危险词「%ls」\n", dangerWord.c_str());
+                    wprintf(L"         目标文字：%ls\n", h.text.c_str());
+                    wprintf(L"         确认要执行请加 --yes\n");
+                    LogW(L"动作", 4013, L"异常", L"危险动作被拦截",
+                         L"text=%ls word=%ls x=%d y=%d",
+                         h.text.c_str(), dangerWord.c_str(), h.box.cx(), h.box.cy());
+                    return 1;
+                }
+            }
+
             if (g_opt.dryRun) {
+                std::wstring expectText = args.Get(L"--expect");
+                std::wstring expectGone = args.Get(L"--expect-gone");
+                if (!expectText.empty() || !expectGone.empty()) {
+                    wprintf(L"[dry-run] 会验证：出现「%ls」 消失「%ls」\n",
+                            expectText.c_str(), expectGone.c_str());
+                }
                 if (g_opt.json) {
-                    wprintf(L"{\"ok\":true,\"dryRun\":true,\"text\":\"%ls\",\"x\":%d,\"y\":%d,\"score\":%.2f}\n",
-                            h.text.c_str(), h.box.cx(), h.box.cy(), h.score);
+                    wprintf(L"{\"ok\":true,\"dryRun\":true,\"text\":\"%ls\",\"x\":%d,\"y\":%d,\"score\":%.2f,\"dangerous\":%ls}\n",
+                            h.text.c_str(), h.box.cx(), h.box.cy(), h.score,
+                            dangerous ? L"true" : L"false");
                 } else {
                     wprintf(L"[dry-run] 会点击「%ls」@%d,%d (匹配度 %.2f)\n",
                             h.text.c_str(), h.box.cx(), h.box.cy(), h.score);
                 }
                 return 0;
             }
+
+            GuardAnnounce(std::wstring(L"点击 ") + h.text);
 
             InputInit();
             ClickAt(h.box.cx(), h.box.cy(), args.Has(L"--right"));
@@ -468,6 +500,21 @@ static int CmdClickText(const ArgList& args) {
                         h.text.c_str(), h.box.cx(), h.box.cy(), h.box.w, h.box.h, h.score);
             } else {
                 wprintf(L"CLICKED\t%ls\t%d\t%d\t%.2f\n", h.text.c_str(), h.box.cx(), h.box.cy(), h.score);
+            }
+
+            // Optional post-action verification. This is what turns an open
+            // loop into a closed one: the caller learns whether it worked.
+            std::wstring expectText2 = args.Get(L"--expect");
+            std::wstring expectGone2 = args.Get(L"--expect-gone");
+            if (!expectText2.empty() || !expectGone2.empty()) {
+                int vt = args.GetInt(L"--expect-timeout", 3000);
+                int rc = GuardVerify(expectText2, expectGone2, vt, scale);
+                if (rc != 0) {
+                    wprintf(L"VERIFY-FAILED\texpect=%ls expectGone=%ls timeout=%dms\n",
+                            expectText2.c_str(), expectGone2.c_str(), vt);
+                    return 5;
+                }
+                wprintf(L"VERIFIED\n");
             }
             return 0;
         }
@@ -515,6 +562,9 @@ static void PrintSchema() {
     wprintf(L"    \"要点击某个按钮，直接 click-text 按钮文字，不用自己算坐标\",\n");
     wprintf(L"    \"文字找不到时用 --wait 轮询，不要盲目重复截图\",\n");
     wprintf(L"    \"不确定要做什么时先 --dry-run，看清楚再真执行\",\n");
+    wprintf(L"    \"危险动作默认被拦截，确认无误再加 --yes\",\n");
+    wprintf(L"    \"动作后加 --expect 或 --expect-gone，让工具自己确认成没成\",\n");
+    wprintf(L"    \"要让人跟得上，加 --announce，动作前会先说出来\",\n");
     wprintf(L"    \"中文小字识别率低，可以把 --scale 调到 3\",\n");
     wprintf(L"    \"选中高亮（蓝底白字）会让 OCR 明显变差，必要时先取消选择\"\n");
     wprintf(L"  ]\n");
@@ -551,8 +601,16 @@ static void PrintUsage() {
     wprintf(L"  --show-delta       显示新增/消失的行\n");
     wprintf(L"  --save <文件.png>  同时保存截图\n");
     wprintf(L"\n");
+    wprintf(L"\n");
+    wprintf(L"安全与验证（这些决定你敢不敢放手）:\n");
+    wprintf(L"  --yes                放行含危险词的点击（删除/卸载/格式化/关机...）\n");
+    wprintf(L"  --expect <文字>       动作后确认这段文字出现，否则退出码 5\n");
+    wprintf(L"  --expect-gone <文字>  动作后确认这段文字消失，否则退出码 5\n");
+    wprintf(L"  --expect-timeout ms  验证的超时（默认 3000）\n");
+    wprintf(L"  --announce           动作前先语音播报要做什么\n");
+    wprintf(L"\n");
     wprintf(L"通用选项: --json  --dry-run  --max-duration <秒>\n");
-    wprintf(L"退出码: 0 成功 / 1 参数或未找到 / 2 文件 / 3 执行失败 / 4 超时\n");
+    wprintf(L"退出码: 0 成功 / 1 参数或未找到 / 2 文件 / 3 执行失败 / 4 超时 / 5 验证失败\n");
 }
 
 int wmain(int argc, wchar_t** argv) {
@@ -593,6 +651,7 @@ int wmain(int argc, wchar_t** argv) {
     g_opt.json = args.Has(L"--json");
     g_opt.dryRun = args.Has(L"--dry-run");
     g_opt.maxDurationSec = args.GetInt(L"--max-duration", 0);
+    g_opt.announce = args.Has(L"--announce");
 
     if (args.raw.empty()) {
         PrintUsage();

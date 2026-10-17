@@ -170,6 +170,123 @@ struct Config {
     const wchar_t* modeName;
 };
 
+// ---------------------------------------------------------------------------
+//  Region crop experiment
+//
+//  Question: small text on a full screen. Is it better to upscale the whole
+//  screen 2x, or to crop just the text area and upscale that 4x?
+//
+//  Both end up with a different number of pixels per glyph, but they also
+//  differ in total image size, which may affect the engine. Measure it.
+// ---------------------------------------------------------------------------
+
+static HBITMAP CropDib(HBITMAP src, int sw, int sh, RectI r, int scale) {
+    if (r.x < 0) { r.w += r.x; r.x = 0; }
+    if (r.y < 0) { r.h += r.y; r.y = 0; }
+    if (r.x + r.w > sw) r.w = sw - r.x;
+    if (r.y + r.h > sh) r.h = sh - r.y;
+    if (r.w <= 0 || r.h <= 0) return nullptr;
+
+    HDC screen = GetDC(nullptr);
+    if (!screen) return nullptr;
+    int dw = r.w * scale, dh = r.h * scale;
+    void* bits = nullptr;
+    HBITMAP dst = NewDib(screen, dw, dh, &bits);
+    if (!dst) { ReleaseDC(nullptr, screen); return nullptr; }
+
+    HDC sdc = CreateCompatibleDC(screen);
+    HDC ddc = CreateCompatibleDC(screen);
+    HGDIOBJ os = SelectObject(sdc, src);
+    HGDIOBJ od = SelectObject(ddc, dst);
+    SetStretchBltMode(ddc, HALFTONE);
+    SetBrushOrgEx(ddc, 0, 0, nullptr);
+    StretchBlt(ddc, 0, 0, dw, dh, sdc, r.x, r.y, r.w, r.h, SRCCOPY);
+    SelectObject(ddc, od);
+    SelectObject(sdc, os);
+    DeleteDC(ddc);
+    DeleteDC(sdc);
+    ReleaseDC(nullptr, screen);
+    return dst;
+}
+
+static double OcrDibCer(HBITMAP dib, int w, int h, const std::wstring& ref) {
+    BITMAP bm{};
+    GetObjectW(dib, sizeof(bm), &bm);
+    if (!bm.bmBits) return 1.0;
+    OcrResult r = EyeOcrPixels(bm.bmBits, w, h);
+    if (!r.ok) return 1.0;
+    std::sort(r.lines.begin(), r.lines.end(),
+              [](const OcrLine& a, const OcrLine& b) { return a.box.y < b.box.y; });
+    std::wstring hyp;
+    for (const auto& line : r.lines) {
+        if (!hyp.empty()) hyp += L" ";
+        hyp += line.text;
+    }
+    return Cer(ref, hyp);
+}
+
+static void RegionExperiment(const std::wstring& ref) {
+    const int CW = 1440, CH = 900;
+    const int sizes[] = { 10, 12, 14, 16 };
+    const int nSize = 4;
+
+    wprintf(L"\n=== region crop vs whole screen ===\n");
+    wprintf(L"canvas %dx%d, text drawn at 300,400\n", CW, CH);
+    wprintf(L"%-6ls %14ls %14ls %14ls\n",
+            L"px", L"full@2x", L"crop@2x", L"crop@4x");
+
+    for (int si = 0; si < nSize; ++si) {
+        int px = sizes[si];
+
+        HDC screen = GetDC(nullptr);
+        if (!screen) return;
+        void* bits = nullptr;
+        HBITMAP canvas = NewDib(screen, CW, CH, &bits);
+        HDC mem = CreateCompatibleDC(screen);
+        HGDIOBJ old = SelectObject(mem, canvas);
+        RECT full{ 0, 0, CW, CH };
+        HBRUSH bg = CreateSolidBrush(RGB(255, 255, 255));
+        FillRect(mem, &full, bg);
+        DeleteObject(bg);
+
+        HFONT font = CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
+        HGDIOBJ oldFont = SelectObject(mem, font);
+        SetBkMode(mem, TRANSPARENT);
+        SetTextColor(mem, RGB(24, 24, 24));
+        RECT measure{ 0, 0, 0, 0 };
+        DrawTextW(mem, ref.c_str(), (int)ref.size(), &measure,
+                  DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+        RECT tr{ 300, 400, 300 + measure.right, 400 + measure.bottom };
+        DrawTextW(mem, ref.c_str(), (int)ref.size(), &tr,
+                  DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+
+        SelectObject(mem, oldFont);
+        DeleteObject(font);
+        SelectObject(mem, old);
+        DeleteDC(mem);
+        ReleaseDC(nullptr, screen);
+
+        // A: whole canvas at 2x
+        HBITMAP fullDib = CropDib(canvas, CW, CH, RectI{ 0, 0, CW, CH }, 2);
+        double cerFull = fullDib ? OcrDibCer(fullDib, CW * 2, CH * 2, ref) : 1.0;
+        if (fullDib) DeleteObject(fullDib);
+
+        // B and C: crop around the text with padding
+        RectI crop{ 300 - 16, 400 - 16, measure.right + 32, measure.bottom + 32 };
+        HBITMAP crop2 = CropDib(canvas, CW, CH, crop, 2);
+        double cerCrop2 = crop2 ? OcrDibCer(crop2, crop.w * 2, crop.h * 2, ref) : 1.0;
+        if (crop2) DeleteObject(crop2);
+
+        HBITMAP crop4 = CropDib(canvas, CW, CH, crop, 4);
+        double cerCrop4 = crop4 ? OcrDibCer(crop4, crop.w * 4, crop.h * 4, ref) : 1.0;
+        if (crop4) DeleteObject(crop4);
+
+        DeleteObject(canvas);
+        wprintf(L"%-6d %14.3f %14.3f %14.3f\n", px, cerFull, cerCrop2, cerCrop4);
+    }
+}
 int CmdBench(const std::vector<std::wstring>& args) {
     (void)args;
 
@@ -269,6 +386,19 @@ int CmdBench(const std::vector<std::wstring>& args) {
         if (avg < bestAvg) { bestAvg = avg; bestCfg = ci; }
     }
 
+    // Matrix: raw, every font size against every upscale factor.
+    // This is the table that answers "does more upscale help small text,
+    // and where does it start to hurt?"
+    wprintf(L"\n=== raw, error rate by size and upscale ===\n");
+    wprintf(L"%-6ls %8ls %8ls %8ls %8ls\n", L"px", L"1x", L"2x", L"3x", L"4x");
+    for (int si = 0; si < nSize; ++si) {
+        wprintf(L"%-6d", sizes[si]);
+        for (int s = 0; s < 4; ++s) {
+            double v = (res[si][0][s] + res[si][1][s]) / 2.0;   // average light and dark
+            wprintf(L" %8.3f", v);
+        }
+        wprintf(L"\n");
+    }
     // Per-size detail for the best config
     wprintf(L"\n=== best config: scale %d, %ls ===\n",
             cfgs[bestCfg].scale, cfgs[bestCfg].modeName);
@@ -285,6 +415,8 @@ int CmdBench(const std::vector<std::wstring>& args) {
                     samples[si][t].c_str());
         }
     }
+
+    RegionExperiment(ref);
 
     LogI(L"感知", 3002, L"感知", L"OCR 完成",
          L"bench=1 best_scale=%d best_mode=%ls avg=%.3f",

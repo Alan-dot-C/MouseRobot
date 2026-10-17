@@ -624,6 +624,9 @@ static const std::vector<LogEventDef> kCatalog = {
     { 4008, L"动作", L"动作",  L"滚轮",                L"x= y= delta=" },
     { 4009, L"动作", L"动作",  L"按文字点击",           L"text= x= y= score=" },
     { 4010, L"动作", L"异常",  L"键名无法识别",         L"key=" },
+    { 4011, L"动作", L"动作",  L"动作验证通过",          L"expect= expectGone= ms=" },
+    { 4012, L"动作", L"动作",  L"动作验证超时",          L"expect= expectGone= timeout=" },
+    { 4013, L"动作", L"异常",  L"危险动作被拦截",         L"text= word=" },
 
     // 5xxx 语音（嘴）
     { 5000, L"语音", L"语音",  L"播报开始",            L"chars= voice= rate= volume=" },
