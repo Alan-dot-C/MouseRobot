@@ -21,6 +21,7 @@
 #include "bench.h"
 #include "guard.h"
 #include "doctor.h"
+#include "gui.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -828,6 +829,12 @@ static int Dispatch(const ArgList& args, const std::wstring& cmd) {
     if (cmd == L"log")   return CmdLogQuery(args.raw);
     if (cmd == L"bench") return CmdBench(args.raw);
     if (cmd == L"doctor") return CmdDoctor(args.raw);
+    if (cmd == L"gui") {
+        // Hide the console the moment the window comes up, so double-clicking
+        // a shortcut does not leave a black box behind the window.
+        FreeConsole();
+        return RunGui();
+    }
     if (cmd == L"see") return CmdSee(args);
     if (cmd == L"click-text" || cmd == L"clicktext") return CmdClickText(args);
 
