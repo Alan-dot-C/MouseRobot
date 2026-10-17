@@ -20,7 +20,8 @@ if errorlevel 1 (
 )
 
 echo Building handeye.exe ...
-cl /nologo /utf-8 /std:c++20 /EHsc /O2 /MT /Fe:handeye.exe src\*.cpp windowsapp.lib gdi32.lib user32.lib ole32.lib
+rem /MP: compile the translation units in parallel (cuts a full build from ~35s to ~10s)
+cl /nologo /utf-8 /std:c++20 /EHsc /O2 /MT /MP /Fe:handeye.exe src\*.cpp windowsapp.lib gdi32.lib user32.lib ole32.lib
 
 if errorlevel 1 (
     echo [FAILED]

@@ -38,7 +38,9 @@
 
 ```
 handeye see [选项]                 看屏幕（截屏 + OCR + 筛子）
-handeye click-text <文字>          找到文字并点击 —— 眼手联动
+handeye click-text <文字>          找到文字并点击 —— 先 UI Automation，再 OCR
+handeye read-text [选项]           读窗口里的文字（UIA / 剪贴板，比 OCR 准）
+handeye ui [选项]                  列出当前窗口的 UI 控件树（调试用）
 handeye click <x> <y>              点击坐标
 handeye move <x> <y>               移动鼠标
 handeye type <文字>                输入文字（支持中文）
@@ -54,6 +56,21 @@ handeye stop                       停止正在运行的动作
 handeye schema                     输出能力清单（给模型看）
 ```
 
+### 两条路：控件树和像素
+
+`click-text` 不是一上来就 OCR。它先查 Windows 的 UI Automation 控件树：
+标准按钮/菜单/输入框都有名字和边界，**不会认错字**；只有查不到时（游戏、画布、
+自绘界面）才回落到 OCR。输出里的 `via=ui` / `via=ocr` 会告诉你这次是靠什么点中的。
+
+```
+handeye click-text "确定"              # 先 UI，再 OCR
+handeye click-text "确定" --via ocr    # 强制走 OCR
+```
+
+同理，要读大段文字用 `read-text`：UIA 的 TextPattern 是 100% 准确的，
+比 OCR 便宜也比 OCR 准。`--method copy` 会退到「全选 + 复制 + 读剪贴板」，
+代价是会动剪贴板（工具会尽量恢复原来的内容）。
+
 ### see 的选项
 
 | 选项 | 说明 |
@@ -61,7 +78,7 @@ handeye schema                     输出能力清单（给模型看）
 | `--region x,y,w,h` | 只识别这一块区域，快很多（会自动补留白） |
 | `--scale auto\|1\|2\|3` | 送 OCR 前的放大倍数，默认 auto（按文字类型选） |
 | `--lang auto\|zh\|en` | 识别引擎，默认 auto（中文行用 zh，拉丁/数字行用 en） |
-| `--pad N` | 裁切时四周留白像素，默认 12 |
+| `--pad N` | 裁切时四周留白像素，默认 8 |
 | `--fast` | 只跑中文 1x，最快；轮询用 |
 | `--best` | 双引擎合并 + 可疑行二次识别，最准 |
 | `--find <文字>` | 模糊查找，返回坐标和匹配度 |

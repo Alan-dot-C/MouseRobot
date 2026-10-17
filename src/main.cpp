@@ -23,6 +23,8 @@
 #include "doctor.h"
 #include "gui.h"
 #include "schema.h"
+#include "uia.h"
+#include "clip.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -396,6 +398,16 @@ static int CmdSee(const ArgList& args) {
     SieveResult sr = SieveRun(r.lines, so);
     LogV(L"感知", 3003, L"感知", L"筛子完成", L"blocks=%zu raw=%zu", sr.blocks.size(), r.lines.size());
 
+    // --ui：把标准控件的树也带上。OCR 认的是像素，控件树认的是名字，
+    // 两者叠起来，模型既看得到自绘界面，也看得到真正的按钮名。
+    std::vector<UiNode> uiNodes;
+    if (args.Has(L"--ui") && UiInit()) {
+        uiNodes = UiTree(nullptr,
+                         args.GetInt(L"--ui-depth", 8),
+                         args.GetInt(L"--ui-max", 300),
+                         args.GetInt(L"--ui-timeout", 400));
+    }
+
     POINT cur = GetCursorPosNow();
     std::wstring focus = GetForegroundTitle();
     RectI scr = EyeScreenRect();
@@ -445,6 +457,24 @@ static int CmdSee(const ArgList& args) {
         blocks += L"]";
         d.Raw(L"blocks", blocks);
 
+        if (!uiNodes.empty()) {
+            std::wstring ui = L"[";
+            for (size_t i = 0; i < uiNodes.size(); ++i) {
+                if (i) ui += L",";
+                ui += L"{\"role\":\"" + JsonStr(uiNodes[i].role) + L"\"";
+                ui += L",\"name\":\"" + JsonStr(uiNodes[i].name) + L"\"";
+                ui += L",\"value\":\"" + JsonStr(uiNodes[i].value) + L"\"";
+                ui += L",\"x\":" + std::to_wstring(uiNodes[i].rect.x);
+                ui += L",\"y\":" + std::to_wstring(uiNodes[i].rect.y);
+                ui += L",\"w\":" + std::to_wstring(uiNodes[i].rect.w);
+                ui += L",\"h\":" + std::to_wstring(uiNodes[i].rect.h);
+                ui += std::wstring(L",\"invokable\":") + (uiNodes[i].invokable ? L"true" : L"false");
+                ui += L"}";
+            }
+            ui += L"]";
+            d.Raw(L"ui", ui);
+        }
+
         wprintf(L"%ls\n", d.Emit().c_str());
         return 0;
     }
@@ -461,6 +491,13 @@ static int CmdSee(const ArgList& args) {
             scr.w, scr.h, cur.x, cur.y, r.scale, r.lines.size(), sr.blocks.size(),
             contentParas.size(), sr.newLines, sr.goneLines);
     if (!focus.empty()) wprintf(L"[focus] %ls\n", focus.c_str());
+
+    for (const auto& n : uiNodes) {
+        wprintf(L"[ui:%ls] %ls @%d,%d %dx%d%ls%ls\n",
+                n.role.c_str(), n.name.c_str(), n.rect.x, n.rect.y, n.rect.w, n.rect.h,
+                n.invokable ? L" invoke" : L"",
+                n.value.empty() ? L"" : (L" value=" + n.value).c_str());
+    }
 
     // Output grouped by owning window. A window header is printed once, then
     // its elements, then its body paragraphs. This is the structure the OS
@@ -589,8 +626,22 @@ static std::vector<LineItem> BuildContentParagraphs(const SieveResult& sr, int m
 
 // ------------------------------ click-text：眼手联动 ------------------------------
 
+// 一次命中的统一表示：不管来自 UI Automation 还是 OCR
+struct ClickHit {
+    std::wstring text;
+    RectI        box;
+    double       score = 0;
+    std::wstring via = L"ocr";
+    bool         invokable = false;
+    bool         haveUi = false;
+    UiNode       ui;
+};
+
 // 找到屏幕上的文字并点它。这是"眼"和"手"的接缝：
 // AI 不需要知道坐标，只要说要点什么。
+//
+// 策略链：先 UI Automation（标准控件有名字和边界，不会认错字），
+// 命中不了再回落到 OCR。--via ocr 可以强制走 OCR。
 static int CmdClickText(const ArgList& args) {
     auto pos = args.Positional();
     if (pos.size() < 2) { wprintf(L"ERR 用法: click-text <文字> [--index N] [--timeout ms]\n"); return 1; }
@@ -601,11 +652,127 @@ static int CmdClickText(const ArgList& args) {
     }
     if (!EyeInit()) { wprintf(L"ERR 没有可用的 OCR 引擎\n"); return 3; }
 
+    const std::wstring via = ToUpper(args.Get(L"--via", L"auto"));
     OcrRequest oreq = BuildOcrRequest(args, RectI{});
     int timeout = args.GetInt(L"--timeout", 0);
     int wanted = args.GetInt(L"--index", 0);
     DWORD start = GetTickCount();
 
+    auto perform = [&](const ClickHit& h) -> int {
+        // Danger guard. A tool that can click anything needs a brake.
+        std::wstring dangerWord;
+        bool dangerous = GuardIsDangerous(h.text, dangerWord);
+        bool confirmed = args.Has(L"--yes");
+        if (dangerous && !confirmed) {
+            if (g_opt.dryRun) {
+                wprintf(L"[dry-run] 注意：目标含危险词「%ls」，正式执行会被拦截，需要加 --yes\n",
+                        dangerWord.c_str());
+            } else {
+                wprintf(L"BLOCKED\t目标含危险词「%ls」\n", dangerWord.c_str());
+                wprintf(L"         目标文字：%ls\n", h.text.c_str());
+                wprintf(L"         确认要执行请加 --yes\n");
+                LogW(L"动作", 4013, L"异常", L"危险动作被拦截",
+                     L"text=%ls word=%ls x=%d y=%d via=%ls",
+                     h.text.c_str(), dangerWord.c_str(), h.box.cx(), h.box.cy(), h.via.c_str());
+                return 1;
+            }
+        }
+
+        if (g_opt.dryRun) {
+            std::wstring expectText = args.Get(L"--expect");
+            std::wstring expectGone = args.Get(L"--expect-gone");
+            if (!expectText.empty() || !expectGone.empty()) {
+                wprintf(L"[dry-run] 会验证：出现「%ls」 消失「%ls」\n",
+                        expectText.c_str(), expectGone.c_str());
+            }
+            if (g_opt.json) {
+                JsonDoc d;
+                d.Bool(L"ok", true).Bool(L"dryRun", true);
+                d.Str(L"text", h.text);
+                d.Int(L"x", h.box.cx()).Int(L"y", h.box.cy());
+                d.Dbl(L"score", h.score);
+                d.Bool(L"dangerous", dangerous);
+                d.Str(L"via", h.via);
+                wprintf(L"%ls\n", d.Emit().c_str());
+            } else {
+                wprintf(L"[dry-run] 会点击「%ls」@%d,%d (匹配度 %.2f, %ls)\n",
+                        h.text.c_str(), h.box.cx(), h.box.cy(), h.score, h.via.c_str());
+            }
+            return 0;
+        }
+
+        GuardAnnounce(std::wstring(L"点击 ") + h.text);
+
+        if (h.invokable && h.haveUi) {
+            // 标准按钮优先用 InvokePattern：不用移动鼠标，也不受坐标影响
+            if (!UiInvoke(h.ui)) {
+                InputInit();
+                ClickAt(h.box.cx(), h.box.cy(), args.Has(L"--right"));
+                InputShutdown();
+            }
+        } else {
+            InputInit();
+            ClickAt(h.box.cx(), h.box.cy(), args.Has(L"--right"));
+            InputShutdown();
+        }
+
+        if (g_opt.json) {
+            JsonDoc d;
+            d.Bool(L"ok", true);
+            d.Str(L"text", h.text);
+            d.Int(L"x", h.box.cx()).Int(L"y", h.box.cy());
+            d.Int(L"w", h.box.w).Int(L"h", h.box.h);
+            d.Dbl(L"score", h.score);
+            d.Str(L"via", h.via);
+            wprintf(L"%ls\n", d.Emit().c_str());
+        } else {
+            wprintf(L"CLICKED\t%ls\t%d\t%d\t%.2f\t%ls\n",
+                    h.text.c_str(), h.box.cx(), h.box.cy(), h.score, h.via.c_str());
+        }
+
+        // Optional post-action verification. This is what turns an open
+        // loop into a closed one: the caller learns whether it worked.
+        std::wstring expectText2 = args.Get(L"--expect");
+        std::wstring expectGone2 = args.Get(L"--expect-gone");
+        if (!expectText2.empty() || !expectGone2.empty()) {
+            int vt = args.GetInt(L"--expect-timeout", 3000);
+            int rc = GuardVerify(expectText2, expectGone2, vt, 0);
+            if (rc != 0) {
+                wprintf(L"VERIFY-FAILED\texpect=%ls expectGone=%ls timeout=%dms\n",
+                        expectText2.c_str(), expectGone2.c_str(), vt);
+                return 5;
+            }
+            wprintf(L"VERIFIED\n");
+        }
+        return 0;
+    };
+
+    // 1) UI Automation：标准控件的名字是准的，优先用它
+    if (via != L"OCR" && UiInit()) {
+        auto nodes = UiFind(needle, 300, 400);
+        if (!nodes.empty()) {
+            // 跳过不可见/不可用的，除非只剩它们
+            std::vector<UiNode> usable;
+            for (auto& n : nodes) if (n.enabled && !n.offscreen) usable.push_back(n);
+            if (usable.empty()) usable = nodes;
+
+            int idx = wanted;
+            if (idx < 0 || idx >= int(usable.size())) idx = 0;
+            const UiNode& n = usable[idx];
+
+            ClickHit h;
+            h.text = n.name;
+            h.box = n.rect;
+            h.score = 1.0;
+            h.via = L"ui";
+            h.invokable = n.invokable;
+            h.haveUi = true;
+            h.ui = n;
+            if (h.box.w > 0 && h.box.h > 0) return perform(h);
+        }
+    }
+
+    // 2) OCR
     for (;;) {
         OcrResult r = EyeRecognize(oreq);
         if (!r.ok) { wprintf(L"ERR %ls\n", r.error.c_str()); return 3; }
@@ -616,82 +783,12 @@ static int CmdClickText(const ArgList& args) {
             if (idx < 0 || idx >= int(hits.size())) idx = 0;
             const auto& h = hits[idx];
 
-            // Danger guard. A tool that can click anything needs a brake.
-            // Dry-run still previews, but says out loud that a real run
-            // would be blocked.
-            std::wstring dangerWord;
-            bool dangerous = GuardIsDangerous(h.text, dangerWord);
-            bool confirmed = args.Has(L"--yes");
-            if (dangerous && !confirmed) {
-                if (g_opt.dryRun) {
-                    wprintf(L"[dry-run] 注意：目标含危险词「%ls」，正式执行会被拦截，需要加 --yes\n",
-                            dangerWord.c_str());
-                } else {
-                    wprintf(L"BLOCKED\t目标含危险词「%ls」\n", dangerWord.c_str());
-                    wprintf(L"         目标文字：%ls\n", h.text.c_str());
-                    wprintf(L"         确认要执行请加 --yes\n");
-                    LogW(L"动作", 4013, L"异常", L"危险动作被拦截",
-                         L"text=%ls word=%ls x=%d y=%d",
-                         h.text.c_str(), dangerWord.c_str(), h.box.cx(), h.box.cy());
-                    return 1;
-                }
-            }
-
-            if (g_opt.dryRun) {
-                std::wstring expectText = args.Get(L"--expect");
-                std::wstring expectGone = args.Get(L"--expect-gone");
-                if (!expectText.empty() || !expectGone.empty()) {
-                    wprintf(L"[dry-run] 会验证：出现「%ls」 消失「%ls」\n",
-                            expectText.c_str(), expectGone.c_str());
-                }
-                if (g_opt.json) {
-                    JsonDoc d;
-                    d.Bool(L"ok", true).Bool(L"dryRun", true);
-                    d.Str(L"text", h.text);
-                    d.Int(L"x", h.box.cx()).Int(L"y", h.box.cy());
-                    d.Dbl(L"score", h.score);
-                    d.Bool(L"dangerous", dangerous);
-                    wprintf(L"%ls\n", d.Emit().c_str());
-                } else {
-                    wprintf(L"[dry-run] 会点击「%ls」@%d,%d (匹配度 %.2f)\n",
-                            h.text.c_str(), h.box.cx(), h.box.cy(), h.score);
-                }
-                return 0;
-            }
-
-            GuardAnnounce(std::wstring(L"点击 ") + h.text);
-
-            InputInit();
-            ClickAt(h.box.cx(), h.box.cy(), args.Has(L"--right"));
-            InputShutdown();
-
-            if (g_opt.json) {
-                JsonDoc d;
-                d.Bool(L"ok", true);
-                d.Str(L"text", h.text);
-                d.Int(L"x", h.box.cx()).Int(L"y", h.box.cy());
-                d.Int(L"w", h.box.w).Int(L"h", h.box.h);
-                d.Dbl(L"score", h.score);
-                wprintf(L"%ls\n", d.Emit().c_str());
-            } else {
-                wprintf(L"CLICKED\t%ls\t%d\t%d\t%.2f\n", h.text.c_str(), h.box.cx(), h.box.cy(), h.score);
-            }
-
-            // Optional post-action verification. This is what turns an open
-            // loop into a closed one: the caller learns whether it worked.
-            std::wstring expectText2 = args.Get(L"--expect");
-            std::wstring expectGone2 = args.Get(L"--expect-gone");
-            if (!expectText2.empty() || !expectGone2.empty()) {
-                int vt = args.GetInt(L"--expect-timeout", 3000);
-                int rc = GuardVerify(expectText2, expectGone2, vt, 0);
-                if (rc != 0) {
-                    wprintf(L"VERIFY-FAILED\texpect=%ls expectGone=%ls timeout=%dms\n",
-                            expectText2.c_str(), expectGone2.c_str(), vt);
-                    return 5;
-                }
-                wprintf(L"VERIFIED\n");
-            }
-            return 0;
+            ClickHit ch;
+            ch.text = h.text;
+            ch.box = h.box;
+            ch.score = h.score;
+            ch.via = L"ocr";
+            return perform(ch);
         }
 
         if (timeout <= 0 || int(GetTickCount() - start) > timeout) {
@@ -706,6 +803,143 @@ static int CmdClickText(const ArgList& args) {
         }
         Sleep(300);
     }
+}
+
+// ------------------------------ ui：控件树调试 ------------------------------
+
+static int CmdUi(const ArgList& args) {
+    if (!UiInit()) {
+        wprintf(L"ERR UI Automation 不可用（COM 初始化失败）\n");
+        return 3;
+    }
+    int depth = args.GetInt(L"--depth", 8);
+    int maxNodes = args.GetInt(L"--max", 800);
+    std::wstring filter = args.Get(L"--text");
+
+    auto nodes = UiTree(nullptr, depth, maxNodes, 1500);
+    if (!filter.empty()) {
+        std::vector<UiNode> keep;
+        for (auto& n : nodes) if (n.name.find(filter) != std::wstring::npos) keep.push_back(n);
+        nodes.swap(keep);
+    }
+
+    if (g_opt.json) {
+        std::wstring arr = L"[";
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (i) arr += L",";
+            arr += L"{\"role\":\"" + JsonStr(nodes[i].role) + L"\"";
+            arr += L",\"name\":\"" + JsonStr(nodes[i].name) + L"\"";
+            arr += L",\"value\":\"" + JsonStr(nodes[i].value) + L"\"";
+            arr += L",\"x\":" + std::to_wstring(nodes[i].rect.x);
+            arr += L",\"y\":" + std::to_wstring(nodes[i].rect.y);
+            arr += L",\"w\":" + std::to_wstring(nodes[i].rect.w);
+            arr += L",\"h\":" + std::to_wstring(nodes[i].rect.h);
+            arr += std::wstring(L",\"enabled\":") + (nodes[i].enabled ? L"true" : L"false");
+            arr += std::wstring(L",\"invokable\":") + (nodes[i].invokable ? L"true" : L"false");
+            arr += L"}";
+        }
+        arr += L"]";
+        JsonDoc d;
+        d.Bool(L"ok", true).Int(L"count", (long long)nodes.size());
+        d.Raw(L"nodes", arr);
+        wprintf(L"%ls\n", d.Emit().c_str());
+    } else {
+        for (const auto& n : nodes) {
+            wprintf(L"[%ls] %ls @%d,%d %dx%d%ls%ls\n",
+                    n.role.c_str(), n.name.c_str(), n.rect.x, n.rect.y, n.rect.w, n.rect.h,
+                    n.invokable ? L" invoke" : L"",
+                    n.value.empty() ? L"" : (L" value=" + n.value).c_str());
+        }
+        if (nodes.empty()) {
+            wprintf(L"（当前窗口没有可读的控件）\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// ------------------------------ read-text ------------------------------
+
+static int CmdReadText(const ArgList& args) {
+    std::wstring window = args.Get(L"--window");
+    std::wstring method = ToUpper(args.Get(L"--method", L"auto"));
+    int timeoutMs = args.GetInt(L"--timeout", 2000);
+    if (method.empty()) method = L"AUTO";
+
+    if (!window.empty()) {
+        InputInit();
+        FocusWindow(window, 800);
+        InputShutdown();
+    }
+
+    if (!UiInit()) {
+        if (method != L"COPY") {
+            wprintf(L"ERR UI Automation 不可用；可以试 --method copy\n");
+            return 3;
+        }
+    }
+
+    std::wstring text;
+    std::wstring via;
+
+    if (method != L"COPY") {
+        if (UiFocusedText(text) && !text.empty()) {
+            via = L"uia-focus";
+        } else {
+            // 前台窗口文档里的文字
+            auto nodes = UiTree(nullptr, 8, 400, 800);
+            std::wstring buf;
+            for (const auto& n : nodes) {
+                if (n.role != L"document" && n.role != L"text" && n.role != L"edit") continue;
+                std::wstring t;
+                if (UiGetText(n, t) && !t.empty()) { buf += t; buf += L"\n"; }
+            }
+            if (!buf.empty()) { text = buf; via = L"uia-window"; }
+        }
+    }
+
+    // 只有显式 --method copy 才动剪贴板：它会全选，是有副作用的
+    if (text.empty() && method == L"COPY") {
+        ClipSnapshot snap = ClipTake();
+        DWORD seq0 = GetClipboardSequenceNumber();
+
+        InputInit();
+        PressKeyCombo(L"CTRL+A");
+        Sleep(80);
+        PressKeyCombo(L"CTRL+C");
+        InputShutdown();
+
+        DWORD t0 = GetTickCount();
+        bool changed = false;
+        while ((int)(GetTickCount() - t0) < timeoutMs) {
+            if (GetClipboardSequenceNumber() != seq0) { changed = true; break; }
+            Sleep(30);
+        }
+        if (changed) ClipGetText(text);
+        ClipRestore(snap);
+        if (!text.empty()) via = L"copy";
+    }
+
+    if (text.empty()) {
+        if (g_opt.json) {
+            JsonDoc d;
+            d.Bool(L"ok", false).Str(L"error", L"没有读到文字");
+            wprintf(L"%ls\n", d.Emit().c_str());
+        } else {
+            wprintf(L"ERR 没有读到文字（该控件可能不支持文本读取；试 --method copy）\n");
+        }
+        return 1;
+    }
+
+    if (g_opt.json) {
+        JsonDoc d;
+        d.Bool(L"ok", true).Int(L"chars", (long long)text.size());
+        d.Str(L"text", text).Str(L"via", via);
+        wprintf(L"%ls\n", d.Emit().c_str());
+    } else {
+        wprintf(L"%ls\n", text.c_str());
+    }
+    return 0;
 }
 
 // ------------------------------ 能力自述 ------------------------------
@@ -826,6 +1060,8 @@ static int Dispatch(const ArgList& args, const std::wstring& cmd) {
     }
     if (cmd == L"see") return CmdSee(args);
     if (cmd == L"click-text" || cmd == L"clicktext") return CmdClickText(args);
+    if (cmd == L"ui") return CmdUi(args);
+    if (cmd == L"read-text" || cmd == L"readtext") return CmdReadText(args);
 
     auto pos = args.Positional();   // pos[0] 是命令本身
 

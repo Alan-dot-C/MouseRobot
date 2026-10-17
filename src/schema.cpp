@@ -68,6 +68,20 @@ static const OptSpec kClickOpts[] = {
     { nullptr, false, nullptr }
 };
 
+static const OptSpec kReadTextOpts[] = {
+    { L"--window",  true, L"先切到这个窗口再读" },
+    { L"--method",  true, L"auto(默认，UI Automation) / copy(全选复制)" },
+    { L"--timeout", true, L"等剪贴板变化的毫秒（默认 2000）" },
+    { nullptr, false, nullptr }
+};
+
+static const OptSpec kUiOpts[] = {
+    { L"--depth", true, L"最大深度（默认 8）" },
+    { L"--max",   true, L"最多节点数（默认 800）" },
+    { L"--text",  true, L"只列出名字包含这段文字的节点" },
+    { nullptr, false, nullptr }
+};
+
 static const OptSpec kSayOpts[] = {
     { L"--voice",     true,  L"语音名（见 voices）" },
     { L"--rate",      true,  L"语速 -10..10" },
@@ -130,6 +144,8 @@ static const CmdSpec kCmds[] = {
     { L"type",       L"type <文字>",               L"输入文字（支持中文与任意 Unicode）", nullptr },
     { L"key",        L"key <键名或组合键>",        L"按键，如 ENTER / CTRL+S / 0x41", nullptr },
     { L"focus",      L"focus <标题片段>",          L"把窗口切到前台", nullptr },
+    { L"read-text",  L"read-text [选项]",          L"读窗口里的文字（UIA / 剪贴板，比 OCR 准）", kReadTextOpts },
+    { L"ui",         L"ui [选项]",                 L"列出当前窗口的 UI 控件树（调试用）", kUiOpts },
     { L"act",        L"act <脚本.txt>",            L"执行脚本（脚本里也能按文字点击）", nullptr },
     { L"say",        L"say <文字> [选项]",         L"语音播报", kSayOpts },
     { L"voices",     L"voices",                    L"列出可用语音", nullptr },
