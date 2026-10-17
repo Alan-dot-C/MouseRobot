@@ -52,6 +52,9 @@ int  EyeGetTimeout();
 // 识别一块屏幕。这是主入口。
 OcrResult EyeRecognize(const OcrRequest& req);
 
+// 对一张图片文件走同一条管线（回归测量用）
+OcrResult EyeRecognizeImageFile(const std::wstring& path);
+
 // 兼容旧调用：单路识别，指定放大倍数。
 OcrResult EyeCaptureAndOcr(const RectI& region, int scale);
 

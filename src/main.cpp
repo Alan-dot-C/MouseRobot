@@ -86,6 +86,7 @@ static bool ParseRect(const std::wstring& s, RectI& out) {
 
 static std::vector<LineItem> BuildContentParagraphs(const SieveResult& sr, int maxChars);
 static int Dispatch(const ArgList& args, const std::wstring& cmd);
+static std::wstring SaveFailureShot();
 
 // ------------------------------ 状态文件 ------------------------------
 //
@@ -322,6 +323,8 @@ static int CmdSee(const ArgList& args) {
         LogE(L"感知", r.timedOut ? 3007 : 3008, L"异常",
              r.timedOut ? L"OCR 超时" : L"截屏失败",
              L"err=%ls ms=%lu", r.error.c_str(), (unsigned long)msCapture);
+        std::wstring shot = SaveFailureShot();
+        if (!shot.empty()) Say(L"现场截图: %ls", shot.c_str());
         if (g_opt.json) {
             JsonDoc d;
             d.Bool(L"ok", false).Str(L"error", r.error);
@@ -752,8 +755,10 @@ static int CmdClickText(const ArgList& args) {
                 return 4;
             }
             if (rc != 0) {
+                std::wstring shot = SaveFailureShot();
                 wprintf(L"VERIFY-FAILED\texpect=%ls expectGone=%ls timeout=%dms\n",
                         expectText2.c_str(), expectGone2.c_str(), vt);
+                if (!shot.empty()) Say(L"现场截图: %ls", shot.c_str());
                 return 5;
             }
             wprintf(L"VERIFIED\n");
@@ -956,6 +961,42 @@ static int CmdReadText(const ArgList& args) {
     return 0;
 }
 
+// 日志里的命令行脱敏：--log-text mask/off 时不要把用户输入的文字原样落盘。
+// 以前 argv 是无条件写进 8000 事件的，和 README 承诺的脱敏对不上。
+static std::wstring RedactArgv(const std::vector<std::wstring>& raw) {
+    if (raw.empty()) return L"";
+    if (g_log.textMode == LOG_TEXT_FULL) {
+        std::wstring s;
+        for (size_t i = 0; i < raw.size(); ++i) {
+            if (i) s += L" ";
+            s += raw[i];
+        }
+        return s;
+    }
+    std::wstring s = raw[0];
+    int hidden = 0;
+    for (size_t i = 1; i < raw.size(); ++i) {
+        if (!raw[i].empty() && raw[i][0] == L'-') { s += L" "; s += raw[i]; }
+        else ++hidden;
+    }
+    if (hidden > 0) {
+        s += L" ***";
+        if (hidden > 1) s += L" x" + std::to_wstring(hidden);
+    }
+    return s;
+}
+
+// 出问题的时候留一张现场图，比事后问"当时屏幕上是什么"有用得多
+static std::wstring SaveFailureShot() {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    wchar_t name[80] = {};
+    swprintf_s(name, L"fail_%04d%02d%02d_%02d%02d%02d.png",
+               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    std::wstring path = HandeyeStateDir() + L"\\" + name;
+    return EyeSavePng(path, RectI{}) ? path : L"";
+}
+
 // ------------------------------ 能力自述 ------------------------------
 
 // 能力清单和帮助都从 schema.cpp 的同一张表生成。
@@ -1022,11 +1063,7 @@ int wmain(int argc, wchar_t** argv) {
 
     // 会话开始：把完整命令行记下来，事后能复原"AI 到底调了什么"
     {
-        std::wstring argvJoin;
-        for (size_t i = 0; i < args.raw.size(); ++i) {
-            if (i) argvJoin += L" ";
-            argvJoin += args.raw[i];
-        }
+        std::wstring argvJoin = RedactArgv(args.raw);
         if (argvJoin.size() > 400) argvJoin = argvJoin.substr(0, 400) + L"…";
         wchar_t cwd[MAX_PATH] = {};
         GetCurrentDirectoryW(MAX_PATH, cwd);

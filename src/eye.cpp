@@ -221,7 +221,7 @@ static bool CropImg(const Img& s, int x, int y, int w, int h, Img& d) {
 
 // 整数倍放大。GDI+ 的 HighQualityBicubic 对 OCR 比 GDI 的 HALFTONE 稳
 // （HALFTONE 本来就是给缩图设计的，用它放大是糊的）。
-static bool ResizeImg(const Img& s, int factor, Img& d) {
+static bool ResizeImg(const Img& s, int factor, Img& d, bool nearest = false) {
     if (factor <= 1) { d = s; return true; }
     EnsureGdiPlus();
     d.w = s.w * factor;
@@ -235,10 +235,39 @@ static bool ResizeImg(const Img& s, int factor, Img& d) {
 
     {
         Gdiplus::Graphics g(&dst);
-        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        // 整数倍放大：最近邻保边最狠，实测英文识别 0.000；
+        // 双三次偏软，会把 W 糊成 m（Whatever -> matever）。
+        g.SetInterpolationMode(nearest ? Gdiplus::InterpolationModeNearestNeighbor
+                                       : Gdiplus::InterpolationModeHighQualityBicubic);
         g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
         g.DrawImage(&src, 0, 0, d.w, d.h);
     }
+    return true;
+}
+
+// 从文件读一张图（回归测量用）。支持 png/jpg/bmp。
+static bool LoadImgFile(const std::wstring& path, Img& out) {
+    EnsureGdiPlus();
+    Gdiplus::Bitmap bmp(path.c_str());
+    if (bmp.GetLastStatus() != Gdiplus::Ok) return false;
+
+    const int w = (int)bmp.GetWidth();
+    const int h = (int)bmp.GetHeight();
+    if (w <= 0 || h <= 0) return false;
+
+    Gdiplus::Rect rect(0, 0, w, h);
+    Gdiplus::BitmapData data{};
+    if (bmp.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppRGB, &data) != Gdiplus::Ok)
+        return false;
+
+    out.w = w;
+    out.h = h;
+    out.px.resize(size_t(w) * size_t(h) * 4);
+    for (int y = 0; y < h; ++y) {
+        const auto* src = static_cast<const uint8_t*>(data.Scan0) + ptrdiff_t(y) * data.Stride;
+        memcpy(&out.px[size_t(y) * w * 4], src, size_t(w) * 4);
+    }
+    bmp.UnlockBits(&data);
     return true;
 }
 
@@ -472,34 +501,11 @@ static RectI ClampRect(const RectI& r, const RectI& bounds) {
     return o;
 }
 
-OcrResult EyeRecognize(const OcrRequest& reqIn) {
+// 识别一张已经抓好的图（截屏和读文件共用这一段）。
+static OcrResult RecognizeFromBase(Img base, const RectI& region, int pad,
+                                   const OcrRequest& reqIn) {
     OcrResult out;
-    if (!EyeInit()) {
-        out.error = L"没有可用的 OCR 引擎（可能没装中文 OCR 语言包）";
-        return out;
-    }
-
-    const RectI screen = EyeScreenRect();
-    RectI region = reqIn.region.empty() ? screen : ClampRect(reqIn.region, screen);
     out.region = region;
-
-    Img base;
-    if (!CaptureRaw(region, base)) {
-        out.error = L"截屏失败";
-        return out;
-    }
-
-    // 只有显式裁了一块区域才需要补留白：整屏截图本身边缘就有内容，
-    // 再补一圈等于凭空造出背景，反而可能干扰行切分。
-    int pad = 0;
-    if (reqIn.padPx > 0 && !reqIn.region.empty()) {
-        // 注意：不能写 PadImg(base, pad, base) —— 源和目标是同一个对象时，
-        // 先改宽高再读像素会越界，补出来的图直接是坏的（表现为 OCR 返回 0 行）。
-        Img padded;
-        PadImg(base, reqIn.padPx, padded);
-        base = std::move(padded);
-        pad = reqIn.padPx;
-    }
 
     // 引擎上限（实机是 10000），超了要降倍数
     int scale = reqIn.scale > 0 ? reqIn.scale : 1;
@@ -549,7 +555,7 @@ OcrResult EyeRecognize(const OcrRequest& reqIn) {
                 // 区域大就用 2 倍，小就用 3 倍，控制耗时
                 int f = (double(bbox.w) * bbox.h > 0.5 * double(region.w) * region.h) ? 2 : 3;
                 Img big;
-                if (ResizeImg(crop, f, big)) {
+                if (ResizeImg(crop, f, big, true)) {
                     std::vector<OcrLine> enLines;
                     std::wstring enErr;
                     if (RecognizeImg(big, true, f, bbox, 0, enLines, enErr, timedOut)) {
@@ -574,6 +580,54 @@ OcrResult EyeRecognize(const OcrRequest& reqIn) {
 
     out.ok = true;
     return out;
+}
+
+OcrResult EyeRecognize(const OcrRequest& reqIn) {
+    OcrResult out;
+    if (!EyeInit()) {
+        out.error = L"没有可用的 OCR 引擎（可能没装中文 OCR 语言包）";
+        return out;
+    }
+
+    const RectI screen = EyeScreenRect();
+    RectI region = reqIn.region.empty() ? screen : ClampRect(reqIn.region, screen);
+
+    Img base;
+    if (!CaptureRaw(region, base)) {
+        out.error = L"截屏失败";
+        return out;
+    }
+
+    // 只有显式裁了一块区域才需要补留白：整屏截图本身边缘就有内容，
+    // 再补一圈等于凭空造出背景，反而可能干扰行切分。
+    int pad = 0;
+    if (reqIn.padPx > 0 && !reqIn.region.empty()) {
+        // 注意：不能写 PadImg(base, pad, base) —— 源和目标是同一个对象时，
+        // 先改宽高再读像素会越界，补出来的图直接是坏的（表现为 OCR 返回 0 行）。
+        Img padded;
+        PadImg(base, reqIn.padPx, padded);
+        base = std::move(padded);
+        pad = reqIn.padPx;
+    }
+
+    return RecognizeFromBase(std::move(base), region, pad, reqIn);
+}
+
+// 对一张图片文件走同一条管线（回归测量用）。
+OcrResult EyeRecognizeImageFile(const std::wstring& path) {
+    OcrResult bad;
+    if (!EyeInit()) {
+        bad.error = L"没有可用的 OCR 引擎";
+        return bad;
+    }
+    Img base;
+    if (!LoadImgFile(path, base)) {
+        bad.error = L"图片解码失败: " + path;
+        return bad;
+    }
+    OcrRequest req;
+    RectI region{ 0, 0, base.w, base.h };
+    return RecognizeFromBase(std::move(base), region, 0, req);
 }
 
 OcrResult EyeCaptureAndOcr(const RectI& region, int scale) {

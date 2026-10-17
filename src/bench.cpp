@@ -137,6 +137,8 @@ static std::wstring StripSpace(const std::wstring& s) {
     std::wstring o;
     for (wchar_t c : s) {
         if (iswspace(c)) continue;
+        // 区域拼接用的分隔符和省略号不算错误
+        if (c == L'|' || c == L'…') continue;
         // Normalise full-width punctuation to ASCII. Otherwise "．" vs "."
         // counts as an error even though the character was read correctly.
         switch (c) {
@@ -287,7 +289,115 @@ static void RegionExperiment(const std::wstring& ref) {
         wprintf(L"%-6d %14.3f %14.3f %14.3f\n", px, cerFull, cerCrop2, cerCrop4);
     }
 }
+// ---------------------------------------------------------------------------
+//  固定截图回归：handeye bench --screen 图.png --truth 真值.txt [--threshold 0.18]
+//
+//  真值文件每行一条：x,y,w,h<TAB>参考文字
+//  以 # 开头的行和空行忽略。截图不要进 git（那是用户的屏幕内容）。
+// ---------------------------------------------------------------------------
+
+static bool ReadAllUtf8(const std::wstring& path, std::wstring& out) {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return false;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::vector<char> buf(size_t(sz > 0 ? sz : 0) + 1, 0);
+    size_t got = sz > 0 ? fread(buf.data(), 1, size_t(sz), f) : 0;
+    fclose(f);
+    std::string s(buf.data(), got);
+    if (s.size() >= 3 && (unsigned char)s[0] == 0xEF && (unsigned char)s[1] == 0xBB && (unsigned char)s[2] == 0xBF)
+        s = s.substr(3);
+    out = FromUtf8(s);
+    return true;
+}
+
+static std::wstring RegionText(const std::vector<OcrLine>& lines, const RectI& box) {
+    std::vector<const OcrLine*> picked;
+    for (const auto& l : lines) {
+        int cx = l.box.cx(), cy = l.box.cy();
+        if (cx >= box.x - 2 && cx <= box.right() + 2 && cy >= box.y - 4 && cy <= box.bottom() + 4)
+            picked.push_back(&l);
+    }
+    std::sort(picked.begin(), picked.end(), [](const OcrLine* a, const OcrLine* b) {
+        if (a->box.y != b->box.y) return a->box.y < b->box.y;
+        return a->box.x < b->box.x;
+    });
+    std::wstring s;
+    for (size_t i = 0; i < picked.size(); ++i) {
+        if (i) s += L" | ";
+        s += picked[i]->text;
+    }
+    return s;
+}
+
+static int BenchScreen(const std::wstring& image, const std::wstring& truthPath, double threshold) {
+    OcrResult r = EyeRecognizeImageFile(image);
+    if (!r.ok) {
+        wprintf(L"ERR %ls\n", r.error.c_str());
+        return 3;
+    }
+    wprintf(L"图片: %ls  %dx%d  行数: %zu\n", image.c_str(), r.region.w, r.region.h, r.lines.size());
+    wprintf(L"阈值: %.3f\n\n", threshold);
+
+    std::wstring truth;
+    if (!ReadAllUtf8(truthPath, truth)) {
+        wprintf(L"ERR 读不到真值文件: %ls\n", truthPath.c_str());
+        return 2;
+    }
+
+    double sum = 0;
+    int n = 0, failed = 0;
+    for (const auto& raw : Split(truth, L'\n')) {
+        std::wstring line = Trim(raw);
+        if (line.empty() || line[0] == L'#') continue;
+
+        size_t tab = line.find(L'\t');
+        if (tab == std::wstring::npos) continue;
+        std::wstring rectStr = Trim(line.substr(0, tab));
+        std::wstring ref = Trim(line.substr(tab + 1));
+        RectI box;
+        auto parts = Split(rectStr, L',');
+        if (parts.size() != 4) continue;
+        box.x = _wtoi(parts[0].c_str());
+        box.y = _wtoi(parts[1].c_str());
+        box.w = _wtoi(parts[2].c_str());
+        box.h = _wtoi(parts[3].c_str());
+
+        std::wstring got = RegionText(r.lines, box);
+        double cer = Cer(ref, got);
+        sum += cer;
+        ++n;
+        if (cer > threshold) ++failed;
+        wprintf(L"%-6s CER=%.3f  %s\n", (cer > threshold ? L"FAIL" : L"ok"), cer, got.c_str());
+        wprintf(L"       参考: %ls\n", ref.c_str());
+    }
+
+    if (n == 0) {
+        wprintf(L"ERR 真值文件里没有有效行\n");
+        return 2;
+    }
+    double avg = sum / n;
+    wprintf(L"\n平均 CER = %.3f （%d 个区域，%d 个超阈值）\n", avg, n, failed);
+    return (avg > threshold) ? 1 : 0;
+}
+
 int CmdBench(const std::vector<std::wstring>& args) {
+    std::wstring screen, truth;
+    double threshold = 0.18;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (args[i] == L"--screen" && i + 1 < args.size()) screen = args[i + 1];
+        else if (args[i] == L"--truth" && i + 1 < args.size()) truth = args[i + 1];
+        else if (args[i] == L"--threshold" && i + 1 < args.size()) threshold = _wtof(args[i + 1].c_str());
+    }
+    if (!screen.empty()) {
+        if (truth.empty()) {
+            wprintf(L"ERR --screen 还需要 --truth 真值文件\n");
+            return 1;
+        }
+        return BenchScreen(screen, truth, threshold);
+    }
+
     (void)args;
 
     // Mixed Chinese / Latin / digits, similar to real UI text.
