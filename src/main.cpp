@@ -20,6 +20,7 @@
 #include "logquery.h"
 #include "bench.h"
 #include "guard.h"
+#include "doctor.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -128,18 +129,102 @@ static int CmdSee(const ArgList& args) {
     // --changed 走图像指纹，不需要 OCR，又快又稳。
     // 早先用 OCR 文本比对，OCR 逐帧有小抖动，会误报 +4/-4。
     if (args.Has(L"--changed")) {
-        uint64_t now = EyeScreenHash(region);
-        uint64_t prev = 0;
-        bool havePrev = ReadHashState(prev);
-        int dist = havePrev ? HashDistance(prev, now) : 64;
-        const int threshold = args.GetInt(L"--threshold", 3);
-        bool changed = !havePrev || dist > threshold;
-        WriteHashState(now);
+        // Coarse grid difference. A single hash bit tells you that something
+        // moved; the grid tells you where. 48x30 cells over the whole screen
+        // is 1440 bytes of state and localises the change well enough to act.
+        const int GW = 48, GH = 30;
+        std::vector<uint8_t> now;
+        if (!EyeCoarseGrid(GW, GH, now, region)) {
+            wprintf(L"ERR 截屏失败\n");
+            return 3;
+        }
+
+        std::wstring gridPath = HashStatePath();
+        size_t slash = gridPath.find_last_of(L'\\');
+        if (slash != std::wstring::npos) gridPath = gridPath.substr(0, slash + 1) + L"last_grid.txt";
+
+        std::vector<uint8_t> prev;
+        bool havePrev = false;
+        {
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, gridPath.c_str(), L"rb") == 0 && f) {
+                std::string hex;
+                char buf[4096];
+                size_t got = fread(buf, 1, sizeof(buf) - 1, f);
+                hex.assign(buf, got);
+                fclose(f);
+                if (hex.size() == size_t(GW) * GH * 2) {
+                    prev.resize(size_t(GW) * GH);
+                    for (size_t i = 0; i < prev.size(); ++i) {
+                        char b2[3] = { hex[i * 2], hex[i * 2 + 1], 0 };
+                        prev[i] = (uint8_t)strtoul(b2, nullptr, 16);
+                    }
+                    havePrev = true;
+                }
+            }
+        }
+
+        RECT scrRect{ 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+        if (!region.empty()) scrRect = RECT{ region.x, region.y, region.right(), region.bottom() };
+        int sw = scrRect.right - scrRect.left, sh = scrRect.bottom - scrRect.top;
+        int cw = (sw + GW - 1) / GW, ch = (sh + GH - 1) / GH;
+
+        const int cellThreshold = args.GetInt(L"--threshold", 12);
+        int changedCells = 0;
+        int minX = GW, minY = GH, maxX = -1, maxY = -1;
+        for (int y = 0; y < GH; ++y) {
+            for (int x = 0; x < GW; ++x) {
+                size_t i = size_t(y) * GW + x;
+                int diff = havePrev ? std::abs(int(now[i]) - int(prev[i])) : 255;
+                if (diff > cellThreshold) {
+                    ++changedCells;
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+        bool changed = !havePrev || changedCells > 0;
+
+        // Save the new grid for next time.
+        {
+            FILE* f = nullptr;
+            if (_wfopen_s(&f, gridPath.c_str(), L"wb") == 0 && f) {
+                std::string hex;
+                hex.reserve(now.size() * 2);
+                const char* digits = "0123456789abcdef";
+                for (uint8_t v : now) { hex += digits[v >> 4]; hex += digits[v & 0xF]; }
+                fwrite(hex.data(), 1, hex.size(), f);
+                fclose(f);
+            }
+        }
+
         if (g_opt.json) {
-            wprintf(L"{\"changed\":%ls,\"distance\":%d,\"firstFrame\":%ls}\n",
-                    changed ? L"true" : L"false", dist, havePrev ? L"false" : L"true");
+            if (changed) {
+                wprintf(L"{\"changed\":true,\"cells\":%d,\"region\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d},\"firstFrame\":%ls}\n",
+                        changedCells,
+                        scrRect.left + minX * cw, scrRect.top + minY * ch,
+                        (maxX - minX + 1) * cw, (maxY - minY + 1) * ch,
+                        havePrev ? L"false" : L"true");
+            } else {
+                wprintf(L"{\"changed\":false,\"cells\":0,\"firstFrame\":false}\n");
+            }
         } else {
-            wprintf(L"%ls\tdistance=%d\n", changed ? L"CHANGED" : L"UNCHANGED", dist);
+            if (changed) {
+                // Cell size rounds up, so the box can overshoot the captured
+                // region. Clamp it, otherwise the reported area is larger than
+                // the area that was actually looked at.
+                int bx = scrRect.left + minX * cw;
+                int by = scrRect.top + minY * ch;
+                int bw = (maxX - minX + 1) * cw;
+                int bh = (maxY - minY + 1) * ch;
+                if (bx + bw > scrRect.right) bw = scrRect.right - bx;
+                if (by + bh > scrRect.bottom) bh = scrRect.bottom - by;
+                wprintf(L"CHANGED\tx=%d y=%d w=%d h=%d cells=%d\n", bx, by, bw, bh, changedCells);
+            } else {
+                wprintf(L"UNCHANGED\n");
+            }
         }
         return 0;
     }
@@ -728,7 +813,10 @@ int wmain(int argc, wchar_t** argv) {
         if (rc == 0)
             LogI(L"会话", 8001, L"会话", L"会话结束", L"rc=0 ms=%lu", (unsigned long)ms);
         else
-            LogW(L"会话", 8001, L"会话", L"会话结束", L"rc=%d ms=%lu", rc, (unsigned long)ms);
+            // A non-zero exit code is a normal outcome (not found, blocked,
+            // verification failed), not a warning. Logging it as a warning
+            // drowned the doctor output in noise.
+            LogI(L"会话", 8001, L"会话", L"会话结束", L"rc=%d ms=%lu", rc, (unsigned long)ms);
     }
     LogShutdown();
     return rc;
@@ -739,6 +827,7 @@ static int Dispatch(const ArgList& args, const std::wstring& cmd) {
     if (cmd == L"schema") { PrintSchema(); return 0; }
     if (cmd == L"log")   return CmdLogQuery(args.raw);
     if (cmd == L"bench") return CmdBench(args.raw);
+    if (cmd == L"doctor") return CmdDoctor(args.raw);
     if (cmd == L"see") return CmdSee(args);
     if (cmd == L"click-text" || cmd == L"clicktext") return CmdClickText(args);
 

@@ -285,6 +285,31 @@ OcrResult EyeOcrPixels(const void* bgra, int w, int h) {
     }
     return out;
 }
+bool EyeCoarseGrid(int gw, int gh, std::vector<uint8_t>& cells, const RectI& regionIn) {
+    if (gw <= 0 || gh <= 0) return false;
+    RectI region = regionIn;
+    if (region.empty()) region = EyeScreenRect();
+
+    HDC screen = GetDC(nullptr);
+    void* bits = nullptr;
+    HBITMAP dib = CaptureToDib(screen, region, gw, gh, &bits);
+    if (!dib || !bits) {
+        if (dib) DeleteObject(dib);
+        ReleaseDC(nullptr, screen);
+        return false;
+    }
+    auto* px = static_cast<uint32_t*>(bits);
+    cells.resize(size_t(gw) * size_t(gh));
+    for (int i = 0; i < gw * gh; ++i) {
+        uint32_t c = px[i];
+        int b = int(c & 0xFF), g = int((c >> 8) & 0xFF), r = int((c >> 16) & 0xFF);
+        cells[size_t(i)] = (uint8_t)((r * 299 + g * 587 + b * 114) / 1000);
+    }
+    DeleteObject(dib);
+    ReleaseDC(nullptr, screen);
+    return true;
+}
+
 bool EyeSavePng(const std::wstring& path, const RectI& regionIn) {
     RectI region = regionIn;
     if (region.empty()) region = EyeScreenRect();

@@ -44,5 +44,9 @@ uint64_t EyeScreenHash(const RectI& region);
 // 两个指纹差多少位（0 = 完全一样）
 int HashDistance(uint64_t a, uint64_t b);
 
+// Coarse luminance grid (gw x gh). Each cell is one averaged pixel, so a
+// 48x30 grid is only 1440 bytes and is enough to locate "what changed".
+bool EyeCoarseGrid(int gw, int gh, std::vector<uint8_t>& cells, const RectI& region = RectI{});
+
 // 主屏尺寸
 RectI EyeScreenRect();
