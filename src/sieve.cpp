@@ -274,7 +274,7 @@ static std::wstring NormalizeForCompare(const std::wstring& s) {
     return o;
 }
 
-std::wstring DefaultStatePath() {
+std::wstring HandeyeStateDir() {
     std::wstring dir;
     wchar_t buf[MAX_PATH] = {};
     DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
@@ -288,7 +288,19 @@ std::wstring DefaultStatePath() {
     }
     dir += L"\\handeye";
     CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\last_frame.txt";
+    return dir;
+}
+
+std::wstring StateFilePath(const std::wstring& prefix, const std::wstring& key) {
+    std::wstring k = key.empty() ? L"default" : key;
+    for (wchar_t& c : k) {
+        if (!iswalnum(c) && c != L'-' && c != L'_') c = L'_';
+    }
+    return HandeyeStateDir() + L"\\" + prefix + L"." + k + L".txt";
+}
+
+std::wstring DefaultStatePath() {
+    return StateFilePath(L"last_frame", L"default");
 }
 
 static std::vector<std::wstring> LoadPrevious(const std::wstring& path) {
@@ -370,27 +382,12 @@ SieveResult SieveRun(const std::vector<OcrLine>& linesIn, const SieveOptions& op
         return a.box.y < b.box.y;
     });
 
-    // 5) 裁剪
-    if (!opt.keepAll) {
-        int kept = 0;
-        std::vector<Block> filtered;
-        for (auto& b : res.blocks) {
-            if (kept >= opt.maxLines) break;
-            Block nb = b;
-            if (nb.items.size() > size_t(opt.maxLines)) nb.items.resize(opt.maxLines);
-            for (auto& it : nb.items) {
-                if ((int)it.text.size() > opt.maxLineChars)
-                    it.text = it.text.substr(0, opt.maxLineChars) + L"…";
-            }
-            kept += (int)nb.items.size();
-            filtered.push_back(std::move(nb));
-        }
-        res.blocks.swap(filtered);
-    }
-
-    // 6) 变化检测
+    // 5) 变化检测
+    //    必须在裁剪之前做。先按 maxLines 截断再比对的话，
+    //    "新内容把老内容挤出输出"会被误报成"老文字消失了"。
     if (opt.doDelta) {
-        std::wstring path = opt.statePath.empty() ? DefaultStatePath() : opt.statePath;
+        std::wstring path = opt.statePath;
+        if (path.empty()) path = StateFilePath(L"last_frame", opt.stateKey);
         std::vector<std::wstring> prev = LoadPrevious(path);
 
         std::vector<std::wstring> now;
@@ -408,6 +405,24 @@ SieveResult SieveRun(const std::vector<OcrLine>& linesIn, const SieveOptions& op
 
         res.changed = (res.newLines > 0 || res.goneLines > 0);
         SaveCurrent(path, now);
+    }
+
+    // 6) 裁剪
+    if (!opt.keepAll) {
+        int kept = 0;
+        std::vector<Block> filtered;
+        for (auto& b : res.blocks) {
+            if (kept >= opt.maxLines) break;
+            Block nb = b;
+            if (nb.items.size() > size_t(opt.maxLines)) nb.items.resize(opt.maxLines);
+            for (auto& it : nb.items) {
+                if ((int)it.text.size() > opt.maxLineChars)
+                    it.text = it.text.substr(0, opt.maxLineChars) + L"…";
+            }
+            kept += (int)nb.items.size();
+            filtered.push_back(std::move(nb));
+        }
+        res.blocks.swap(filtered);
     }
 
     return res;

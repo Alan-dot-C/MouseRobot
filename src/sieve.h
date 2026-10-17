@@ -38,8 +38,8 @@ struct SieveOptions {
     int          maxLines = 40;        // 整体最多保留多少行
     int          maxLineChars = 120;   // 单行最长字符数
     bool         doDelta = true;       // 与上一次对比
-    bool         dropUnchanged = false;// 只输出变化部分
-    std::wstring statePath;            // 上一次结果的状态文件
+    std::wstring statePath;            // 显式指定状态文件（测试用）
+    std::wstring stateKey;             // 状态文件的键：多会话/多区域互相隔离
 };
 
 struct SieveResult {
@@ -66,3 +66,8 @@ std::vector<FindHit> SieveFind(const std::vector<OcrLine>& lines,
 
 // 默认状态文件路径（%LOCALAPPDATA%\handeye\last_frame.txt）
 std::wstring DefaultStatePath();
+
+// 状态目录与按 key 隔离的文件名。
+// 以前所有调用共用 last_frame.txt，两个会话同时用会互相把状态写坏。
+std::wstring HandeyeStateDir();
+std::wstring StateFilePath(const std::wstring& prefix, const std::wstring& key);

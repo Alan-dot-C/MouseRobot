@@ -61,6 +61,30 @@ static bool SaveHBitmapAsPng(const std::wstring& path, HBITMAP hbmp) {
 
 static bool        g_eyeReady = false;
 static OcrEngineW  g_engine{ nullptr };
+static int         g_ocrTimeoutMs = 20000;
+
+void EyeSetTimeout(int ms) { g_ocrTimeoutMs = ms; }
+int  EyeGetTimeout() { return g_ocrTimeoutMs; }
+
+// WinRT 的 .get() 会无限阻塞。轮询 Status，超时就 Cancel 并失败返回。
+template <typename T>
+static bool AwaitOp(winrt::Windows::Foundation::IAsyncOperation<T> const& op, int timeoutMs, T& out) {
+    using winrt::Windows::Foundation::AsyncStatus;
+    DWORD start = GetTickCount();
+    for (;;) {
+        AsyncStatus st = op.Status();
+        if (st == AsyncStatus::Completed) {
+            out = op.GetResults();
+            return true;
+        }
+        if (st != AsyncStatus::Started) return false;   // Canceled / Error
+        if (timeoutMs > 0 && (int)(GetTickCount() - start) > timeoutMs) {
+            try { op.Cancel(); } catch (...) {}
+            return false;
+        }
+        Sleep(5);
+    }
+}
 
 bool EyeInit() {
     if (g_eyeReady) return g_engine != nullptr;
@@ -156,7 +180,14 @@ OcrResult EyeCaptureAndOcr(const RectI& regionIn, int scale) {
         auto sb = SoftwareBitmap::CreateCopyFromBuffer(
             buf, BitmapPixelFormat::Bgra8, tw, th, BitmapAlphaMode::Ignore);
 
-        auto res = g_engine.RecognizeAsync(sb).get();
+        Windows::Media::Ocr::OcrResult res{ nullptr };
+        if (!AwaitOp(g_engine.RecognizeAsync(sb), g_ocrTimeoutMs, res)) {
+            DeleteObject(dib);
+            ReleaseDC(nullptr, screen);
+            out.error = L"OCR 超时";
+            out.timedOut = true;
+            return out;
+        }
 
         for (auto const& line : res.Lines()) {
             OcrLine ol;
@@ -254,7 +285,12 @@ OcrResult EyeOcrPixels(const void* bgra, int w, int h) {
             array_view<uint8_t const>(static_cast<uint8_t const*>(bgra), size_t(w) * size_t(h) * 4));
         auto sb = SoftwareBitmap::CreateCopyFromBuffer(
             buf, BitmapPixelFormat::Bgra8, w, h, BitmapAlphaMode::Ignore);
-        auto res = g_engine.RecognizeAsync(sb).get();
+        Windows::Media::Ocr::OcrResult res{ nullptr };
+        if (!AwaitOp(g_engine.RecognizeAsync(sb), g_ocrTimeoutMs, res)) {
+            out.error = L"OCR 超时";
+            out.timedOut = true;
+            return out;
+        }
 
         for (auto const& line : res.Lines()) {
             OcrLine ol;

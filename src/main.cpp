@@ -22,6 +22,7 @@
 #include "guard.h"
 #include "doctor.h"
 #include "gui.h"
+#include "schema.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -33,16 +34,10 @@
 
 // ------------------------------ 参数解析辅助 ------------------------------
 
-// 这些选项后面跟一个值，解析"位置参数"时要连同值一起跳过
+// 这些选项后面跟一个值，解析"位置参数"时要连同值一起跳过。
+// 清单不在这里维护，统一从 schema 表里查，避免四处各写一份。
 static bool IsValueFlag(const std::wstring& s) {
-    static const wchar_t* flags[] = {
-        L"--region", L"--scale", L"--max-lines", L"--max-chars", L"--max-paras",
-        L"--timeout", L"--find", L"--wait", L"--save", L"--voice", L"--rate",
-        L"--volume", L"--wav", L"--loop", L"--max-duration", L"--icon",
-        L"--expect", L"--expect-gone", L"--expect-timeout", L"--index",
-    };
-    for (auto f : flags) if (s == f) return true;
-    return false;
+    return OptTakesValue(s);
 }
 
 struct ArgList {
@@ -90,31 +85,20 @@ static bool ParseRect(const std::wstring& s, RectI& out) {
 static std::vector<LineItem> BuildContentParagraphs(const SieveResult& sr, int maxChars);
 static int Dispatch(const ArgList& args, const std::wstring& cmd);
 
-// ------------------------------ 屏幕指纹状态 ------------------------------
+// ------------------------------ 状态文件 ------------------------------
+//
+// 状态文件按 key 隔离：两个会话同时使用时不会再互相把 delta 基准写坏。
+// --region 用它自己的 key，避免把整屏的基准覆盖成一小块。
 
-static std::wstring HashStatePath() {
-    std::wstring p = DefaultStatePath();      // ...\handeye\last_frame.txt
-    size_t slash = p.find_last_of(L'\\');
-    if (slash == std::wstring::npos) return L"last_hash.txt";
-    return p.substr(0, slash + 1) + L"last_hash.txt";
-}
-
-static bool ReadHashState(uint64_t& h) {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, HashStatePath().c_str(), L"rb") != 0 || !f) return false;
-    char buf[64] = {};
-    size_t got = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    if (got == 0) return false;
-    h = _strtoui64(buf, nullptr, 16);
-    return true;
-}
-
-static void WriteHashState(uint64_t h) {
-    FILE* f = nullptr;
-    if (_wfopen_s(&f, HashStatePath().c_str(), L"wb") != 0 || !f) return;
-    fprintf(f, "%016llx", (unsigned long long)h);
-    fclose(f);
+static std::wstring ResolveStateKey(const ArgList& args, const RectI& region) {
+    std::wstring key = args.Get(L"--state-key");
+    if (!key.empty()) return key;
+    if (!region.empty()) {
+        wchar_t buf[96] = {};
+        swprintf_s(buf, L"region_%d_%d_%d_%d", region.x, region.y, region.w, region.h);
+        return buf;
+    }
+    return L"default";
 }
 
 // ------------------------------ see ------------------------------
@@ -126,6 +110,7 @@ static int CmdSee(const ArgList& args) {
         wprintf(L"ERR --region 需要 \"x,y,w,h\" 格式\n");
         return 1;
     }
+    const std::wstring stateKey = ResolveStateKey(args, region);
 
     // --changed 走图像指纹，不需要 OCR，又快又稳。
     // 早先用 OCR 文本比对，OCR 逐帧有小抖动，会误报 +4/-4。
@@ -140,9 +125,7 @@ static int CmdSee(const ArgList& args) {
             return 3;
         }
 
-        std::wstring gridPath = HashStatePath();
-        size_t slash = gridPath.find_last_of(L'\\');
-        if (slash != std::wstring::npos) gridPath = gridPath.substr(0, slash + 1) + L"last_grid.txt";
+        std::wstring gridPath = StateFilePath(L"last_grid", stateKey);
 
         std::vector<uint8_t> prev;
         bool havePrev = false;
@@ -202,15 +185,17 @@ static int CmdSee(const ArgList& args) {
         }
 
         if (g_opt.json) {
+            JsonDoc d;
+            d.Bool(L"ok", true).Bool(L"changed", changed).Int(L"cells", changedCells);
             if (changed) {
-                wprintf(L"{\"changed\":true,\"cells\":%d,\"region\":{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d},\"firstFrame\":%ls}\n",
-                        changedCells,
-                        scrRect.left + minX * cw, scrRect.top + minY * ch,
-                        (maxX - minX + 1) * cw, (maxY - minY + 1) * ch,
-                        havePrev ? L"false" : L"true");
-            } else {
-                wprintf(L"{\"changed\":false,\"cells\":0,\"firstFrame\":false}\n");
+                wchar_t regionJson[128] = {};
+                swprintf_s(regionJson, L"{\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}",
+                           scrRect.left + minX * cw, scrRect.top + minY * ch,
+                           (maxX - minX + 1) * cw, (maxY - minY + 1) * ch);
+                d.Raw(L"region", regionJson);
             }
+            d.Bool(L"firstFrame", !havePrev);
+            wprintf(L"%ls\n", d.Emit().c_str());
         } else {
             if (changed) {
                 // Cell size rounds up, so the box can overshoot the captured
@@ -232,7 +217,9 @@ static int CmdSee(const ArgList& args) {
 
     if (!EyeInit()) {
         if (g_opt.json) {
-            wprintf(L"{\"ok\":false,\"error\":\"no OCR engine\"}\n");
+            JsonDoc d;
+            d.Bool(L"ok", false).Str(L"error", L"no OCR engine");
+            wprintf(L"%ls\n", d.Emit().c_str());
         } else {
             wprintf(L"ERR 没有可用的 OCR 引擎（可能没装中文 OCR 语言包）\n");
         }
@@ -259,9 +246,13 @@ static int CmdSee(const ArgList& args) {
             if (!hits.empty()) {
                 const auto& h = hits[0];
                 if (g_opt.json) {
-                    wprintf(L"{\"ok\":true,\"found\":true,\"text\":\"%ls\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"score\":%.2f,\"elapsedMs\":%lu}\n",
-                            h.text.c_str(), h.box.x, h.box.y, h.box.w, h.box.h, h.score,
-                            (unsigned long)(GetTickCount() - start));
+                    JsonDoc d;
+                    d.Bool(L"ok", true).Bool(L"found", true);
+                    d.Str(L"text", h.text);
+                    d.Int(L"x", h.box.x).Int(L"y", h.box.y).Int(L"w", h.box.w).Int(L"h", h.box.h);
+                    d.Dbl(L"score", h.score);
+                    d.Raw(L"elapsedMs", std::to_wstring(GetTickCount() - start));
+                    wprintf(L"%ls\n", d.Emit().c_str());
                 } else {
                     wprintf(L"FOUND\t%ls\t%d\t%d\t%d\t%d\t%.2f\t%lums\n",
                             h.text.c_str(), h.box.x, h.box.y, h.box.w, h.box.h, h.score,
@@ -295,10 +286,13 @@ static int CmdSee(const ArgList& args) {
     OcrResult r = EyeCaptureAndOcr(region, scale);
     DWORD msCapture = GetTickCount() - tCapture;
     if (!r.ok) {
-        LogE(L"感知", 3008, L"异常", L"截屏失败", L"err=%ls ms=%lu", r.error.c_str(), (unsigned long)msCapture);
+        LogE(L"感知", r.timedOut ? 3007 : 3008, L"异常",
+             r.timedOut ? L"OCR 超时" : L"截屏失败",
+             L"err=%ls ms=%lu", r.error.c_str(), (unsigned long)msCapture);
         if (g_opt.json) {
-            std::string esc = JsonEscape(ToUtf8(r.error));
-            wprintf(L"{\"ok\":false,\"error\":\"%hs\"}\n", esc.c_str());
+            JsonDoc d;
+            d.Bool(L"ok", false).Str(L"error", r.error);
+            wprintf(L"%ls\n", d.Emit().c_str());
         } else {
             wprintf(L"ERR %ls\n", r.error.c_str());
         }
@@ -310,20 +304,20 @@ static int CmdSee(const ArgList& args) {
     // --raw：不做筛子，直接吐原始行
     if (args.Has(L"--raw")) {
         if (g_opt.json) {
-            std::wstring s = L"{\"ok\":true,\"raw\":true,\"count\":";
-            s += std::to_wstring(r.lines.size());
-            s += L",\"lines\":[";
+            std::wstring linesJson = L"[";
             for (size_t i = 0; i < r.lines.size(); ++i) {
-                if (i) s += L",";
-                s += L"{\"text\":\"";
-                s += FromUtf8(JsonEscape(ToUtf8(r.lines[i].text)));
-                s += L"\",\"x\":" + std::to_wstring(r.lines[i].box.x);
-                s += L",\"y\":" + std::to_wstring(r.lines[i].box.y);
-                s += L",\"w\":" + std::to_wstring(r.lines[i].box.w);
-                s += L",\"h\":" + std::to_wstring(r.lines[i].box.h) + L"}";
+                if (i) linesJson += L",";
+                linesJson += L"{\"text\":\"" + JsonStr(r.lines[i].text) + L"\"";
+                linesJson += L",\"x\":" + std::to_wstring(r.lines[i].box.x);
+                linesJson += L",\"y\":" + std::to_wstring(r.lines[i].box.y);
+                linesJson += L",\"w\":" + std::to_wstring(r.lines[i].box.w);
+                linesJson += L",\"h\":" + std::to_wstring(r.lines[i].box.h) + L"}";
             }
-            s += L"]}\n";
-            wprintf(L"%ls", s.c_str());
+            linesJson += L"]";
+            JsonDoc d;
+            d.Bool(L"ok", true).Bool(L"raw", true).Int(L"count", (long long)r.lines.size());
+            d.Raw(L"lines", linesJson);
+            wprintf(L"%ls\n", d.Emit().c_str());
         } else {
             wprintf(L"INFO raw=%zu scale=%d\n", r.lines.size(), r.scale);
             for (const auto& l : r.lines) {
@@ -338,18 +332,23 @@ static int CmdSee(const ArgList& args) {
     if (!findText.empty()) {
         auto hits = SieveFind(r.lines, findText, 8);
         if (g_opt.json) {
-            std::wstring s = L"{\"ok\":true,\"count\":" + std::to_wstring(hits.size()) + L",\"hits\":[";
+            std::wstring hitsJson = L"[";
             for (size_t i = 0; i < hits.size(); ++i) {
-                if (i) s += L",";
-                s += L"{\"text\":\"" + FromUtf8(JsonEscape(ToUtf8(hits[i].text))) + L"\"";
-                s += L",\"x\":" + std::to_wstring(hits[i].box.x);
-                s += L",\"y\":" + std::to_wstring(hits[i].box.y);
-                s += L",\"w\":" + std::to_wstring(hits[i].box.w);
-                s += L",\"h\":" + std::to_wstring(hits[i].box.h);
-                s += L",\"score\":" + std::to_wstring(hits[i].score) + L"}";
+                if (i) hitsJson += L",";
+                wchar_t score[32] = {};
+                swprintf_s(score, L"%.2f", hits[i].score);
+                hitsJson += L"{\"text\":\"" + JsonStr(hits[i].text) + L"\"";
+                hitsJson += L",\"x\":" + std::to_wstring(hits[i].box.x);
+                hitsJson += L",\"y\":" + std::to_wstring(hits[i].box.y);
+                hitsJson += L",\"w\":" + std::to_wstring(hits[i].box.w);
+                hitsJson += L",\"h\":" + std::to_wstring(hits[i].box.h);
+                hitsJson += L",\"score\":" + std::wstring(score) + L"}";
             }
-            s += L"]}\n";
-            wprintf(L"%ls", s.c_str());
+            hitsJson += L"]";
+            JsonDoc d;
+            d.Bool(L"ok", true).Int(L"count", (long long)hits.size());
+            d.Raw(L"hits", hitsJson);
+            wprintf(L"%ls\n", d.Emit().c_str());
         } else {
             if (hits.empty()) {
                 wprintf(L"NOTFOUND\t%ls\n", findText.c_str());
@@ -371,7 +370,7 @@ static int CmdSee(const ArgList& args) {
     so.maxLines = args.GetInt(L"--max-lines", 40);
     so.maxLineChars = args.GetInt(L"--max-chars", 120);
     so.doDelta = !args.Has(L"--no-delta");
-    so.dropUnchanged = args.Has(L"--changed-only");
+    so.stateKey = stateKey;
 
     SieveResult sr = SieveRun(r.lines, so);
     LogV(L"感知", 3003, L"感知", L"筛子完成", L"blocks=%zu raw=%zu", sr.blocks.size(), r.lines.size());
@@ -381,36 +380,51 @@ static int CmdSee(const ArgList& args) {
     RectI scr = EyeScreenRect();
 
     if (g_opt.json) {
-        std::wstring s = L"{\"ok\":true";
-        s += L",\"screen\":{\"w\":" + std::to_wstring(scr.w) + L",\"h\":" + std::to_wstring(scr.h) + L"}";
-        s += L",\"cursor\":{\"x\":" + std::to_wstring(cur.x) + L",\"y\":" + std::to_wstring(cur.y) + L"}";
-        s += L",\"focus\":\"" + FromUtf8(JsonEscape(ToUtf8(focus))) + L"\"";
-        s += L",\"rawLines\":" + std::to_wstring(r.lines.size());
-        s += L",\"delta\":{\"changed\":" + std::wstring(sr.changed ? L"true" : L"false");
-        s += L",\"added\":" + std::to_wstring(sr.newLines);
-        s += L",\"removed\":" + std::to_wstring(sr.goneLines) + L"}";
-        s += L",\"blocks\":[";
+        JsonDoc d;
+        d.Bool(L"ok", true);
+        {
+            wchar_t buf[64] = {};
+            swprintf_s(buf, L"{\"w\":%d,\"h\":%d}", scr.w, scr.h);
+            d.Raw(L"screen", buf);
+        }
+        {
+            wchar_t buf[64] = {};
+            swprintf_s(buf, L"{\"x\":%d,\"y\":%d}", cur.x, cur.y);
+            d.Raw(L"cursor", buf);
+        }
+        d.Str(L"focus", focus);
+        d.Int(L"rawLines", (long long)r.lines.size());
+        {
+            wchar_t buf[128] = {};
+            swprintf_s(buf, L"{\"changed\":%ls,\"added\":%d,\"removed\":%d}",
+                       sr.changed ? L"true" : L"false", sr.newLines, sr.goneLines);
+            d.Raw(L"delta", buf);
+        }
+
+        std::wstring blocks = L"[";
         bool firstBlock = true;
         for (const auto& b : sr.blocks) {
-            if (!firstBlock) s += L",";
+            if (!firstBlock) blocks += L",";
             firstBlock = false;
-            s += L"{\"kind\":\"" + b.kind + L"\"";
-            s += L",\"window\":\"" + FromUtf8(JsonEscape(ToUtf8(b.window))) + L"\"";
-            s += L",\"box\":{\"x\":" + std::to_wstring(b.box.x) + L",\"y\":" + std::to_wstring(b.box.y);
-            s += L",\"w\":" + std::to_wstring(b.box.w) + L",\"h\":" + std::to_wstring(b.box.h) + L"}";
-            s += L",\"items\":[";
+            blocks += L"{\"kind\":\"" + JsonStr(b.kind) + L"\"";
+            blocks += L",\"window\":\"" + JsonStr(b.window) + L"\"";
+            blocks += L",\"box\":{\"x\":" + std::to_wstring(b.box.x) + L",\"y\":" + std::to_wstring(b.box.y);
+            blocks += L",\"w\":" + std::to_wstring(b.box.w) + L",\"h\":" + std::to_wstring(b.box.h) + L"}";
+            blocks += L",\"items\":[";
             for (size_t i = 0; i < b.items.size(); ++i) {
-                if (i) s += L",";
-                s += L"{\"text\":\"" + FromUtf8(JsonEscape(ToUtf8(b.items[i].text))) + L"\"";
-                s += L",\"x\":" + std::to_wstring(b.items[i].box.x);
-                s += L",\"y\":" + std::to_wstring(b.items[i].box.y);
-                s += L",\"w\":" + std::to_wstring(b.items[i].box.w);
-                s += L",\"h\":" + std::to_wstring(b.items[i].box.h) + L"}";
+                if (i) blocks += L",";
+                blocks += L"{\"text\":\"" + JsonStr(b.items[i].text) + L"\"";
+                blocks += L",\"x\":" + std::to_wstring(b.items[i].box.x);
+                blocks += L",\"y\":" + std::to_wstring(b.items[i].box.y);
+                blocks += L",\"w\":" + std::to_wstring(b.items[i].box.w);
+                blocks += L",\"h\":" + std::to_wstring(b.items[i].box.h) + L"}";
             }
-            s += L"]}";
+            blocks += L"]}";
         }
-        s += L"]}\n";
-        wprintf(L"%ls", s.c_str());
+        blocks += L"]";
+        d.Raw(L"blocks", blocks);
+
+        wprintf(L"%ls\n", d.Emit().c_str());
         return 0;
     }
 
@@ -610,9 +624,13 @@ static int CmdClickText(const ArgList& args) {
                             expectText.c_str(), expectGone.c_str());
                 }
                 if (g_opt.json) {
-                    wprintf(L"{\"ok\":true,\"dryRun\":true,\"text\":\"%ls\",\"x\":%d,\"y\":%d,\"score\":%.2f,\"dangerous\":%ls}\n",
-                            h.text.c_str(), h.box.cx(), h.box.cy(), h.score,
-                            dangerous ? L"true" : L"false");
+                    JsonDoc d;
+                    d.Bool(L"ok", true).Bool(L"dryRun", true);
+                    d.Str(L"text", h.text);
+                    d.Int(L"x", h.box.cx()).Int(L"y", h.box.cy());
+                    d.Dbl(L"score", h.score);
+                    d.Bool(L"dangerous", dangerous);
+                    wprintf(L"%ls\n", d.Emit().c_str());
                 } else {
                     wprintf(L"[dry-run] 会点击「%ls」@%d,%d (匹配度 %.2f)\n",
                             h.text.c_str(), h.box.cx(), h.box.cy(), h.score);
@@ -627,8 +645,13 @@ static int CmdClickText(const ArgList& args) {
             InputShutdown();
 
             if (g_opt.json) {
-                wprintf(L"{\"ok\":true,\"text\":\"%ls\",\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d,\"score\":%.2f}\n",
-                        h.text.c_str(), h.box.cx(), h.box.cy(), h.box.w, h.box.h, h.score);
+                JsonDoc d;
+                d.Bool(L"ok", true);
+                d.Str(L"text", h.text);
+                d.Int(L"x", h.box.cx()).Int(L"y", h.box.cy());
+                d.Int(L"w", h.box.w).Int(L"h", h.box.h);
+                d.Dbl(L"score", h.score);
+                wprintf(L"%ls\n", d.Emit().c_str());
             } else {
                 wprintf(L"CLICKED\t%ls\t%d\t%d\t%.2f\n", h.text.c_str(), h.box.cx(), h.box.cy(), h.score);
             }
@@ -651,8 +674,13 @@ static int CmdClickText(const ArgList& args) {
         }
 
         if (timeout <= 0 || int(GetTickCount() - start) > timeout) {
-            if (g_opt.json) wprintf(L"{\"ok\":false,\"error\":\"not found\"}\n");
-            else wprintf(L"NOTFOUND\t%ls\n", needle.c_str());
+            if (g_opt.json) {
+                JsonDoc d;
+                d.Bool(L"ok", false).Str(L"error", L"not found");
+                wprintf(L"%ls\n", d.Emit().c_str());
+            } else {
+                wprintf(L"NOTFOUND\t%ls\n", needle.c_str());
+            }
             return 1;
         }
         Sleep(300);
@@ -661,88 +689,13 @@ static int CmdClickText(const ArgList& args) {
 
 // ------------------------------ 能力自述 ------------------------------
 
-// 输出一份机器可读的能力清单，任何 AI 都能据此学会怎么用这个工具。
-static void PrintSchema() {
-    wprintf(L"{\n");
-    wprintf(L"  \"tool\": \"handeye\",\n");
-    wprintf(L"  \"purpose\": \"给 AI 使用的屏幕感知与鼠标键盘控制。不绑定任何模型厂商。\",\n");
-    wprintf(L"  \"commands\": [\n");
-    wprintf(L"    {\"name\":\"see\",\"desc\":\"看屏幕，结果经过筛子压缩\",\"options\":[\"--region x,y,w,h\",\"--scale N\",\"--all\",\"--max-paras N\",\"--raw\",\"--find 文字\",\"--wait 文字\",\"--changed\",\"--no-delta\",\"--show-delta\",\"--save 文件.png\"]},\n");
-    wprintf(L"    {\"name\":\"click-text\",\"desc\":\"找到文字并点击（眼手联动）\",\"args\":[\"文字\"],\"options\":[\"--index N\",\"--timeout ms\",\"--right\"]},\n");
-    wprintf(L"    {\"name\":\"click\",\"desc\":\"点击坐标\",\"args\":[\"x\",\"y\"],\"options\":[\"--right\"]},\n");
-    wprintf(L"    {\"name\":\"move\",\"desc\":\"移动鼠标\",\"args\":[\"x\",\"y\"]},\n");
-    wprintf(L"    {\"name\":\"type\",\"desc\":\"输入文字（支持中文与任意 Unicode）\",\"args\":[\"文字\"]},\n");
-    wprintf(L"    {\"name\":\"key\",\"desc\":\"按键或组合键\",\"args\":[\"键名\"],\"examples\":[\"ENTER\",\"CTRL+S\",\"0x41\",\"F5\"]},\n");
-    wprintf(L"    {\"name\":\"focus\",\"desc\":\"把窗口切到前台\",\"args\":[\"标题片段\"]},\n");
-    wprintf(L"    {\"name\":\"act\",\"desc\":\"执行脚本文件\",\"args\":[\"路径\"]},\n");
-    wprintf(L"    {\"name\":\"say\",\"desc\":\"语音播报\",\"args\":[\"文字\"],\"options\":[\"--voice\",\"--rate\",\"--volume\",\"--wav\",\"--async\"]},\n");
-    wprintf(L"    {\"name\":\"voices\",\"desc\":\"列出语音\"},\n");
-    wprintf(L"    {\"name\":\"rec\",\"desc\":\"录制\",\"args\":[\"文件.rec\"],\"options\":[\"--auto\"]},\n");
-    wprintf(L"    {\"name\":\"play\",\"desc\":\"回放\",\"args\":[\"文件.rec\"],\"options\":[\"--loop N\"]},\n");
-    wprintf(L"    {\"name\":\"stop\",\"desc\":\"停止正在运行的动作\"},\n");
-    wprintf(L"    {\"name\":\"schema\",\"desc\":\"输出这份清单\"}\n");
-    wprintf(L"  ],\n");
-    wprintf(L"  \"globalOptions\": [\"--json\",\"--dry-run\",\"--max-duration 秒\"],\n");
-    wprintf(L"  \"exitCodes\": {\"0\":\"成功\",\"1\":\"参数错误或未找到\",\"2\":\"文件错误\",\"3\":\"执行失败\",\"4\":\"超时或被停止\"},\n");
-    wprintf(L"  \"outputFormats\": {\n");
-    wprintf(L"    \"text\": \"[类型] 文字 @x,y wxh；类型为 title/toolbar/sidebar/content/status/dialog/button\",\n");
-    wprintf(L"    \"json\": \"结构化对象，含 blocks[].items[] 与 delta\"\n");
-    wprintf(L"  },\n");
-    wprintf(L"  \"tips\": [\n");
-    wprintf(L"    \"先用 see --changed 判断屏幕有没有动，代价最低\",\n");
-    wprintf(L"    \"要点击某个按钮，直接 click-text 按钮文字，不用自己算坐标\",\n");
-    wprintf(L"    \"文字找不到时用 --wait 轮询，不要盲目重复截图\",\n");
-    wprintf(L"    \"不确定要做什么时先 --dry-run，看清楚再真执行\",\n");
-    wprintf(L"    \"危险动作默认被拦截，确认无误再加 --yes\",\n");
-    wprintf(L"    \"动作后加 --expect 或 --expect-gone，让工具自己确认成没成\",\n");
-    wprintf(L"    \"要让人跟得上，加 --announce，动作前会先说出来\",\n");
-    wprintf(L"    \"中文小字识别率低，可以把 --scale 调到 3\",\n");
-    wprintf(L"    \"选中高亮（蓝底白字）会让 OCR 明显变差，必要时先取消选择\"\n");
-    wprintf(L"  ]\n");
-    wprintf(L"}\n");
-}
+// 能力清单和帮助都从 schema.cpp 的同一张表生成。
+// 以前 IsValueFlag / PrintUsage / PrintSchema 各写一份，对不上是必然的。
+static void PrintSchema() { PrintSchemaFromTable(); }
 
 // ------------------------------ 帮助 ------------------------------
 
-static void PrintUsage() {
-    wprintf(L"handeye —— 给 AI 用的手 / 嘴 / 眼\n");
-    wprintf(L"\n");
-    wprintf(L"  handeye see [选项]              看屏幕：截屏 + OCR + 筛子\n");
-    wprintf(L"  handeye act <脚本.txt>          执行脚本\n");
-    wprintf(L"  handeye click <x> <y> [--right] 点一下\n");
-    wprintf(L"  handeye type <文字>             输入文字（支持中文）\n");
-    wprintf(L"  handeye key <键名或组合键>      按键，如 ENTER / CTRL+S / 0x41\n");
-    wprintf(L"  handeye say <文字> [--voice V] [--rate N] [--volume N] [--wav 文件]\n");
-    wprintf(L"  handeye voices                  列出可用语音\n");
-    wprintf(L"  handeye rec <文件.rec> [--auto] 录制\n");
-    wprintf(L"  handeye play <文件.rec> [--loop N] 回放\n");
-    wprintf(L"  handeye dump <文件.rec>         打印录制内容\n");
-    wprintf(L"  handeye stop                    停止正在运行的动作\n");
-    wprintf(L"\n");
-    wprintf(L"see 的选项:\n");
-    wprintf(L"  --region x,y,w,h   只识别这一块区域\n");
-    wprintf(L"  --scale N          送 OCR 前的放大倍数（默认 2，小字用 3）\n");
-    wprintf(L"  --all              不做显著性裁剪，输出全部\n");
-    wprintf(L"  --max-paras N      正文最多输出几段（默认 10）\n");
-    wprintf(L"  --raw              不做筛子，吐原始 OCR 行\n");
-    wprintf(L"  --find <文字>      模糊查找，返回坐标与匹配度\n");
-    wprintf(L"  --wait <文字>      轮询直到出现（配合 --timeout，默认 5000ms）\n");
-    wprintf(L"  --changed          只回答屏幕变了没有\n");
-    wprintf(L"  --no-delta         不与上一次比对\n");
-    wprintf(L"  --show-delta       显示新增/消失的行\n");
-    wprintf(L"  --save <文件.png>  同时保存截图\n");
-    wprintf(L"\n");
-    wprintf(L"\n");
-    wprintf(L"安全与验证（这些决定你敢不敢放手）:\n");
-    wprintf(L"  --yes                放行含危险词的点击（删除/卸载/格式化/关机...）\n");
-    wprintf(L"  --expect <文字>       动作后确认这段文字出现，否则退出码 5\n");
-    wprintf(L"  --expect-gone <文字>  动作后确认这段文字消失，否则退出码 5\n");
-    wprintf(L"  --expect-timeout ms  验证的超时（默认 3000）\n");
-    wprintf(L"  --announce           动作前先语音播报要做什么\n");
-    wprintf(L"\n");
-    wprintf(L"通用选项: --json  --dry-run  --max-duration <秒>\n");
-    wprintf(L"退出码: 0 成功 / 1 参数或未找到 / 2 文件 / 3 执行失败 / 4 超时 / 5 验证失败\n");
-}
+static void PrintUsage() { PrintUsageFromTable(); }
 
 int wmain(int argc, wchar_t** argv) {
     InitConsoleUtf8();
@@ -783,6 +736,7 @@ int wmain(int argc, wchar_t** argv) {
     g_opt.dryRun = args.Has(L"--dry-run");
     g_opt.maxDurationSec = args.GetInt(L"--max-duration", 0);
     g_opt.announce = args.Has(L"--announce");
+    EyeSetTimeout(args.GetInt(L"--ocr-timeout", 20000));
 
     if (args.raw.empty()) {
         PrintUsage();
@@ -808,6 +762,20 @@ int wmain(int argc, wchar_t** argv) {
     }
 
     int rc = Dispatch(args, cmd);
+
+    // 只会 Say() 的命令（act / click / type / say / stop ...）在 --json 模式下
+    // 本来什么都不输出，警告也一起丢了。这里补一个收尾对象，把 ok/rc/warnings 交代清楚。
+    {
+        bool manualJson = (cmd == L"schema" || cmd == L"log" || cmd == L"doctor" ||
+                           cmd == L"bench" || cmd == L"gui" || cmd == L"help" ||
+                           cmd == L"--help" || cmd == L"-h");
+        if (g_opt.json && !manualJson && !JsonWasEmitted()) {
+            JsonDoc d;
+            d.Bool(L"ok", rc == 0);
+            if (rc != 0) d.Int(L"rc", rc);
+            wprintf(L"%ls\n", d.Emit().c_str());
+        }
+    }
 
     {
         DWORD ms = GetTickCount() - LogStartTick();
@@ -922,14 +890,16 @@ static int Dispatch(const ArgList& args, const std::wstring& cmd) {
     if (cmd == L"voices") {
         auto list = MouthListVoices();
         if (g_opt.json) {
-            std::wstring s = L"{\"ok\":true,\"voices\":[";
+            std::wstring listJson = L"[";
             for (size_t i = 0; i < list.size(); ++i) {
-                if (i) s += L",";
-                s += L"{\"name\":\"" + FromUtf8(JsonEscape(ToUtf8(list[i].name))) + L"\"";
-                s += L",\"lang\":\"" + FromUtf8(JsonEscape(ToUtf8(list[i].language))) + L"\"}";
+                if (i) listJson += L",";
+                listJson += L"{\"name\":\"" + JsonStr(list[i].name) + L"\"";
+                listJson += L",\"lang\":\"" + JsonStr(list[i].language) + L"\"}";
             }
-            s += L"]}\n";
-            wprintf(L"%ls", s.c_str());
+            listJson += L"]";
+            JsonDoc d;
+            d.Bool(L"ok", true).Raw(L"voices", listJson);
+            wprintf(L"%ls\n", d.Emit().c_str());
         } else {
             for (const auto& v : list)
                 wprintf(L"%ls\t%ls\n", v.name.c_str(), v.language.c_str());

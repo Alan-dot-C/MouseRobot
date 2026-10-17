@@ -128,7 +128,12 @@ int EditDistance(const std::wstring& a, const std::wstring& b) {
 
 // ------------------------------ 输出 ------------------------------
 
-static std::wstring g_pending;
+// --json 模式下，Say() 的内容不再直接打印（会破坏单行 JSON），
+// 而是攒在这里，最后由 JsonDoc::Emit 合并成 "warnings":[...]。
+static std::vector<std::wstring> g_warnings;
+static bool g_jsonEmitted = false;
+
+bool JsonWasEmitted() { return g_jsonEmitted; }
 
 void Say(const wchar_t* fmt, ...) {
     va_list ap;
@@ -137,20 +142,71 @@ void Say(const wchar_t* fmt, ...) {
     _vsnwprintf_s(buf, _TRUNCATE, fmt, ap);
     va_end(ap);
     if (g_opt.json) {
-        if (!g_pending.empty()) g_pending += L"\\n";
-        g_pending += FromUtf8(JsonEscape(ToUtf8(buf)));
+        g_warnings.push_back(buf);
     } else {
         wprintf(L"%ls\n", buf);
     }
 }
 
-std::wstring TakePendingMessages() {
-    std::wstring t = g_pending;
-    g_pending.clear();
+std::vector<std::wstring> TakePendingMessages() {
+    std::vector<std::wstring> t;
+    t.swap(g_warnings);
     return t;
 }
 
-void ResetPendingMessages() { g_pending.clear(); }
+void ResetPendingMessages() { g_warnings.clear(); }
+
+std::wstring JsonStr(const std::wstring& s) {
+    return FromUtf8(JsonEscape(ToUtf8(s)));
+}
+
+JsonDoc& JsonDoc::Raw(const std::wstring& key, const std::wstring& rawJson) {
+    fields_.emplace_back(key, rawJson);
+    return *this;
+}
+
+JsonDoc& JsonDoc::Str(const std::wstring& key, const std::wstring& value) {
+    return Raw(key, L"\"" + JsonStr(value) + L"\"");
+}
+
+JsonDoc& JsonDoc::Int(const std::wstring& key, long long value) {
+    return Raw(key, std::to_wstring(value));
+}
+
+JsonDoc& JsonDoc::Bool(const std::wstring& key, bool value) {
+    return Raw(key, value ? L"true" : L"false");
+}
+
+JsonDoc& JsonDoc::Dbl(const std::wstring& key, double value, int decimals) {
+    wchar_t buf[64] = {};
+    swprintf_s(buf, L"%.*f", decimals, value);
+    return Raw(key, buf);
+}
+
+std::wstring JsonDoc::Emit() {
+    g_jsonEmitted = true;
+    std::wstring s = L"{";
+    bool first = true;
+    for (const auto& f : fields_) {
+        if (!first) s += L",";
+        first = false;
+        s += L"\"" + JsonStr(f.first) + L"\":" + f.second;
+    }
+
+    auto warns = TakePendingMessages();
+    if (!warns.empty()) {
+        if (!first) s += L",";
+        s += L"\"warnings\":[";
+        for (size_t i = 0; i < warns.size(); ++i) {
+            if (i) s += L",";
+            s += L"\"" + JsonStr(warns[i]) + L"\"";
+        }
+        s += L"]";
+    }
+
+    s += L"}";
+    return s;
+}
 
 // ------------------------------ 窗口 / 光标 ------------------------------
 

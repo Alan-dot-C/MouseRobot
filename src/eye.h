@@ -17,6 +17,7 @@ struct OcrLine {
 
 struct OcrResult {
     bool                  ok = false;
+    bool                  timedOut = false;
     std::wstring          error;
     std::vector<OcrLine>  lines;
     RectI                 region;    // 实际识别的屏幕区域
@@ -25,6 +26,11 @@ struct OcrResult {
 
 // 初始化 WinRT（进程内只需调用一次）
 bool EyeInit();
+
+// 单次识别的最长等待时间（毫秒，<=0 表示不限制）。默认 20000。
+// 以前是无限等，OCR 服务卡住会把整个进程挂死。
+void EyeSetTimeout(int ms);
+int  EyeGetTimeout();
 
 // 截取屏幕区域并识别。region 为空表示整屏。
 // scale 为送 OCR 前的放大倍数，小字需要更大（默认 2）。
