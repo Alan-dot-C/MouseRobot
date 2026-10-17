@@ -228,7 +228,7 @@ static void PrintJsonStringArray(const OptSpec* opts) {
 void PrintSchemaFromTable() {
     wprintf(L"{\n");
     wprintf(L"  \"tool\": \"handeye\",\n");
-    wprintf(L"  \"version\": \"1.1.0\",\n");
+    wprintf(L"  \"version\": \"1.2.0\",\n");
     wprintf(L"  \"purpose\": \"给 AI 使用的屏幕感知与鼠标键盘控制。不绑定任何模型厂商。\",\n");
 
     wprintf(L"  \"commands\": [\n");
