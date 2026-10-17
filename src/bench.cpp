@@ -369,7 +369,7 @@ static int BenchScreen(const std::wstring& image, const std::wstring& truthPath,
         sum += cer;
         ++n;
         if (cer > threshold) ++failed;
-        wprintf(L"%-6s CER=%.3f  %s\n", (cer > threshold ? L"FAIL" : L"ok"), cer, got.c_str());
+        wprintf(L"%-6s CER=%.3f  %s\n", (cer > threshold ? L"over" : L"ok"), cer, got.c_str());
         wprintf(L"       参考: %ls\n", ref.c_str());
     }
 
@@ -378,7 +378,8 @@ static int BenchScreen(const std::wstring& image, const std::wstring& truthPath,
         return 2;
     }
     double avg = sum / n;
-    wprintf(L"\n平均 CER = %.3f （%d 个区域，%d 个超阈值）\n", avg, n, failed);
+    wprintf(L"\n平均 CER = %.3f （%d 个区域，其中 %d 个高于阈值 %.3f；以平均值为判定）\n",
+            avg, n, failed, threshold);
     return (avg > threshold) ? 1 : 0;
 }
 
