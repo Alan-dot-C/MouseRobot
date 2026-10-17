@@ -30,6 +30,10 @@ bool EyeInit();
 // scale 为送 OCR 前的放大倍数，小字需要更大（默认 2）。
 OcrResult EyeCaptureAndOcr(const RectI& region, int scale);
 
+// 直接识别内存里的 BGRA 像素（自上而下，32bpp）。
+// 测量工具用它：自己画图、自己缩放、自己预处理，绕开截屏。
+OcrResult EyeOcrPixels(const void* bgra, int w, int h);
+
 // 只截屏存 PNG（调试用）
 bool EyeSavePng(const std::wstring& path, const RectI& region);
 

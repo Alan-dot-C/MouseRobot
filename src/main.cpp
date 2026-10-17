@@ -18,6 +18,7 @@
 #include "mouth.h"
 #include "log.h"
 #include "logquery.h"
+#include "bench.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -633,6 +634,7 @@ static int Dispatch(const ArgList& args, const std::wstring& cmd) {
     if (cmd == L"help" || cmd == L"--help" || cmd == L"-h") { PrintUsage(); return 0; }
     if (cmd == L"schema") { PrintSchema(); return 0; }
     if (cmd == L"log")   return CmdLogQuery(args.raw);
+    if (cmd == L"bench") return CmdBench(args.raw);
     if (cmd == L"see") return CmdSee(args);
     if (cmd == L"click-text" || cmd == L"clicktext") return CmdClickText(args);
 

@@ -242,6 +242,49 @@ int HashDistance(uint64_t a, uint64_t b) {
     return n;
 }
 
+OcrResult EyeOcrPixels(const void* bgra, int w, int h) {
+    OcrResult out;
+    out.region = RectI{ 0, 0, w, h };
+    out.scale = 1;
+    if (w <= 0 || h <= 0) { out.error = L"empty bitmap"; return out; }
+    if (!EyeInit()) { out.error = L"no OCR engine"; return out; }
+
+    try {
+        auto buf = Windows::Security::Cryptography::CryptographicBuffer::CreateFromByteArray(
+            array_view<uint8_t const>(static_cast<uint8_t const*>(bgra), size_t(w) * size_t(h) * 4));
+        auto sb = SoftwareBitmap::CreateCopyFromBuffer(
+            buf, BitmapPixelFormat::Bgra8, w, h, BitmapAlphaMode::Ignore);
+        auto res = g_engine.RecognizeAsync(sb).get();
+
+        for (auto const& line : res.Lines()) {
+            OcrLine ol;
+            ol.text = line.Text().c_str();
+            auto words = line.Words();
+            ol.words = (int)words.Size();
+            double minX = 1e18, minY = 1e18, maxX = -1e18, maxY = -1e18;
+            bool any = false;
+            for (auto const& word : words) {
+                auto r = word.BoundingRect();
+                minX = (std::min)(minX, double(r.X));
+                minY = (std::min)(minY, double(r.Y));
+                maxX = (std::max)(maxX, double(r.X + r.Width));
+                maxY = (std::max)(maxY, double(r.Y + r.Height));
+                any = true;
+            }
+            if (any) {
+                ol.box.x = int(minX);
+                ol.box.y = int(minY);
+                ol.box.w = int(maxX - minX);
+                ol.box.h = int(maxY - minY);
+            }
+            if (!ol.text.empty()) out.lines.push_back(std::move(ol));
+        }
+        out.ok = true;
+    } catch (hresult_error const& e) {
+        out.error = e.message().c_str();
+    }
+    return out;
+}
 bool EyeSavePng(const std::wstring& path, const RectI& regionIn) {
     RectI region = regionIn;
     if (region.empty()) region = EyeScreenRect();
