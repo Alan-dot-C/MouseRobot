@@ -68,6 +68,7 @@ struct Options {
     bool noIcon = false;
     bool autoStart = false;
     bool announce = false;      // speak before acting
+    bool instantMove = false;   // 鼠标直接跳到位，不做缓动（机器用）
     int  maxDurationSec = 0;
 };
 

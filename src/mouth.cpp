@@ -3,6 +3,7 @@
 // ============================================================================
 #include "mouth.h"
 #include "log.h"
+#include "input.h"
 
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
@@ -149,6 +150,7 @@ int MouthSpeak(const std::wstring& text,
         // 等到播完：位置走到总长，或状态回落到 None
         auto session = player.PlaybackSession();
         for (int i = 0; i < 6000; ++i) {   // 最多等 5 分钟
+            if (ShouldAbort()) break;
             auto state = session.PlaybackState();
             if (state == MediaPlaybackState::None) break;
             auto pos = session.Position();

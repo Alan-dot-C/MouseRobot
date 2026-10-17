@@ -293,6 +293,16 @@ static int CmdSee(const ArgList& args) {
                 LogW(L"感知", 3010, L"感知", L"等待文字超时", L"query=%ls timeout=%d", waitText.c_str(), timeoutMs);
                 return 1;
             }
+            if (ShouldAbort()) {
+                if (g_opt.json) {
+                    JsonDoc d;
+                    d.Bool(L"ok", false).Str(L"error", L"aborted");
+                    wprintf(L"%ls\n", d.Emit().c_str());
+                } else {
+                    wprintf(L"ABORTED\n");
+                }
+                return 4;
+            }
             Sleep(200);
         }
     }
@@ -737,6 +747,10 @@ static int CmdClickText(const ArgList& args) {
         if (!expectText2.empty() || !expectGone2.empty()) {
             int vt = args.GetInt(L"--expect-timeout", 3000);
             int rc = GuardVerify(expectText2, expectGone2, vt, 0);
+            if (rc == 4) {
+                wprintf(L"ABORTED\n");
+                return 4;
+            }
             if (rc != 0) {
                 wprintf(L"VERIFY-FAILED\texpect=%ls expectGone=%ls timeout=%dms\n",
                         expectText2.c_str(), expectGone2.c_str(), vt);
@@ -991,7 +1005,11 @@ int wmain(int argc, wchar_t** argv) {
     g_opt.dryRun = args.Has(L"--dry-run");
     g_opt.maxDurationSec = args.GetInt(L"--max-duration", 0);
     g_opt.announce = args.Has(L"--announce");
+    g_opt.instantMove = args.Has(L"--instant");
     EyeSetTimeout(args.GetInt(L"--ocr-timeout", 20000));
+
+    // 从进程启动就开始计时，--max-duration 才能覆盖"等屏幕"这种没有鼠标的阶段
+    AbortInit();
 
     if (args.raw.empty()) {
         PrintUsage();

@@ -13,6 +13,7 @@ static const OptSpec kGlobalOpts[] = {
     { L"--dry-run",      false, L"只说不做" },
     { L"--max-duration", true,  L"秒；超过就中止（含等待与验证）" },
     { L"--announce",     false, L"动作前先语音播报" },
+    { L"--instant",      false, L"鼠标直接跳到位，不做缓动（机器用，快很多）" },
     { L"--log-dir",      true,  L"日志目录" },
     { L"--log-level",    true,  L"日志级别：严重/错误/警告/信息/详细" },
     { L"--log-text",     true,  L"文本落盘策略：full/mask/off" },

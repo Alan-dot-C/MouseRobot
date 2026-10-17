@@ -11,9 +11,12 @@
 bool InputInit();
 void InputShutdown();
 
+// 把进程启动时刻记下来，--max-duration 与 stop 才能覆盖"等屏幕"这类没有鼠标的阶段。
+// 在 wmain 里尽早调用一次。
+void AbortInit();
+
 // ---- 基础动作 ----
-void MoveTo(int x, int y, DWORD msSmooth = 300);
-void ClickAt(int x, int y, bool right = false);
+void MoveTo(int x, int y, DWORD msSmooth = 300);void ClickAt(int x, int y, bool right = false);
 void ClickNow(bool right = false);
 void DoubleClickNow();
 void WheelAt(int x, int y, int delta);

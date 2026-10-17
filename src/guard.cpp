@@ -5,6 +5,7 @@
 #include "eye.h"
 #include "sieve.h"
 #include "mouth.h"
+#include "input.h"
 #include "log.h"
 
 #include <cwctype>
@@ -88,6 +89,7 @@ int GuardVerify(const std::wstring& expectText,
                  expectText.c_str(), expectGone.c_str(), timeoutMs);
             return 5;
         }
+        if (ShouldAbort()) return 4;
         Sleep(250);
     }
 }

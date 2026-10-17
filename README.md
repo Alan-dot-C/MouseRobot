@@ -199,11 +199,26 @@ FOCUS Notepad
 SLEEP 400
 TEXT 你好，这是一段测试文字。
 KEY CTRL+S
-WAITWIN "另存为" 3000
+WAITWIN 另存为 3000
 CLICKAT 700 500
 TEXT D:\out.txt
 KEY ENTER
 ```
+
+**脚本里也能"看"**（以前只能按坐标点，窗口一挪就点空）
+
+```
+WAITTEXT 登录 5000        # 等文字出现，超时就失败
+WAITGONE 加载中 8000      # 等它消失
+CLICKTEXT 确定            # 按文字点击：先查控件树，再 OCR
+CLICKTEXT 删除 --index 1  # 第 2 个命中
+SCROLL DOWN 3 --to 下一页  # 一边滚一边找
+CLEARINPUT                # Ctrl+A + Delete
+```
+
+底层指令还是那些：`MOVE` `CLICKAT` `MOVEREL` `CLICK` `RCLICK` `DCLICK`
+`DOWN` `UP` `WHEEL` `KEY` `TEXT` `FOCUS` `WAITWIN` `GETPOS` `SET ${变量}`
+`SLEEP`。任意一行失败，脚本立刻中止并返回 3。
 
 **让 AI 先看清楚再动手**
 

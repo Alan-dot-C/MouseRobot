@@ -10,6 +10,10 @@
 // ============================================================================
 #include "input.h"
 #include "log.h"
+#include "eye.h"
+#include "sieve.h"
+#include "guard.h"
+#include "uia.h"
 
 #include <cstdio>
 #include <cstdarg>
@@ -67,13 +71,17 @@ static int ClampY(int y) {
     return y;
 }
 
+void AbortInit() {
+    if (g_progStart == 0) g_progStart = GetTickCount();
+}
+
 bool InputInit() {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_virtX = GetSystemMetrics(SM_XVIRTUALSCREEN);
     g_virtY = GetSystemMetrics(SM_YVIRTUALSCREEN);
     g_virtW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
     g_virtH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-    g_progStart = GetTickCount();
+    if (g_progStart == 0) g_progStart = GetTickCount();
     if (!g_stopEvent) {
         g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, kStopEventName);
     }
@@ -169,8 +177,8 @@ void DoubleClickNow() {
 }
 
 void ClickAt(int x, int y, bool right) {
-    MoveTo(x, y, 300);
-    SleepInterruptible(120);
+    MoveTo(x, y, g_opt.instantMove ? 0 : 300);
+    SleepInterruptible(g_opt.instantMove ? 30 : 120);
     ClickNow(right);
 }
 
@@ -457,6 +465,76 @@ static bool ReadTextFile(const std::wstring& path, std::wstring& out) {
     return true;
 }
 
+// ------------------------------ 脚本里的"看" ------------------------------
+//
+// 以前脚本只能按坐标点，眼睛完全用不上：窗口一挪就点空。
+// 这里把 click-text 的能力搬进脚本，并且先走 UI Automation 再回落 OCR。
+
+static bool WaitTextOnScreen(const std::wstring& text, bool wantPresent, DWORD timeoutMs) {
+    DWORD start = GetTickCount();
+    OcrRequest req;                 // 默认 auto：中文 1x + 拉丁/数字
+    for (;;) {
+        OcrResult r = EyeRecognize(req);
+        bool found = false;
+        if (r.ok) {
+            auto hits = SieveFind(r.lines, text, 1);
+            found = !hits.empty();
+        }
+        if (found == wantPresent) return true;
+        if (timeoutMs > 0 && (GetTickCount() - start) > timeoutMs) return false;
+        if (ShouldAbort()) return false;
+        Sleep(200);
+    }
+}
+
+static bool ScriptClickText(const std::wstring& text, int index) {
+    // 1) 标准控件
+    if (UiInit()) {
+        auto nodes = UiFind(text, 200, 350);
+        for (const auto& n : nodes) {
+            if (!n.enabled || n.offscreen || n.rect.w <= 0) continue;
+            std::wstring word;
+            if (GuardIsDangerous(n.name, word)) {
+                Say(L"BLOCKED 目标含危险词「%ls」：%ls", word.c_str(), n.name.c_str());
+                return false;
+            }
+            if (g_opt.dryRun) {
+                Say(L"[dry-run] 会%s控件「%ls」@%d,%d",
+                    n.invokable ? L"触发" : L"点击", n.name.c_str(), n.rect.cx(), n.rect.cy());
+                return true;
+            }
+            if (n.invokable && UiInvoke(n)) return true;
+            MoveTo(n.rect.cx(), n.rect.cy(), g_opt.instantMove ? 0 : 200);
+            SleepInterruptible(60);
+            ClickNow(false);
+            return true;
+        }
+    }
+
+    // 2) OCR
+    OcrRequest req;
+    OcrResult r = EyeRecognize(req);
+    if (!r.ok) { Say(L"看屏幕失败: %ls", r.error.c_str()); return false; }
+
+    auto hits = SieveFind(r.lines, text, 8);
+    if (hits.empty()) { Say(L"找不到文字: %ls", text.c_str()); return false; }
+
+    int idx = index;
+    if (idx < 0 || idx >= int(hits.size())) idx = 0;
+    const auto& h = hits[idx];
+
+    std::wstring word;
+    if (GuardIsDangerous(h.text, word)) {
+        Say(L"BLOCKED 目标含危险词「%ls」：%ls", word.c_str(), h.text.c_str());
+        return false;
+    }
+
+    MoveTo(h.box.cx(), h.box.cy(), g_opt.instantMove ? 0 : 200);
+    SleepInterruptible(80);
+    ClickNow(false);
+    return true;
+}
+
 static bool RunScriptLine(const std::wstring& rawLine, int lineNo) {
     std::wstring ln = ExpandVars(rawLine);
     size_t sp = ln.find_first_of(L" \t");
@@ -562,6 +640,87 @@ static bool RunScriptLine(const std::wstring& rawLine, int lineNo) {
         bool found = false;
         for (auto& kv : g_vars) if (kv.key == name) { kv.val = val; found = true; break; }
         if (!found) g_vars.push_back(KeyVal{ name, val });
+        return true;
+    }
+    if (cmd == L"CLICKTEXT") {
+        // CLICKTEXT 文字 [--index N]
+        std::wstring text = rest;
+        int idx = 0;
+        size_t ip = rest.find(L"--index");
+        if (ip != std::wstring::npos) {
+            idx = _wtoi(rest.substr(ip + 7).c_str());
+            text = Trim(rest.substr(0, ip));
+        }
+        if (text.empty()) { Say(L"[第 %d 行] CLICKTEXT 缺少文字", lineNo); return false; }
+        if (!ScriptClickText(text, idx)) { Say(L"[第 %d 行] 按文字点击失败: %ls", lineNo, text.c_str()); return false; }
+        return true;
+    }
+    if (cmd == L"WAITTEXT" || cmd == L"WAITGONE") {
+        // WAITTEXT 文字 [超时ms]
+        std::wstring text = rest;
+        DWORD timeout = 5000;
+        size_t sp2 = rest.find_first_of(L" \t");
+        if (sp2 != std::wstring::npos) {
+            text = rest.substr(0, sp2);
+            int a[1]{ 5000 };
+            ParseInts(rest.substr(sp2), a, 1);
+            timeout = DWORD(a[0] < 0 ? 0 : a[0]);
+        }
+        if (text.empty()) { Say(L"[第 %d 行] %ls 缺少文字", lineNo, cmd.c_str()); return false; }
+        const bool want = (cmd == L"WAITTEXT");
+        if (!WaitTextOnScreen(text, want, timeout)) {
+            Say(L"[第 %d 行] %ls 超时或中止: %ls", lineNo, cmd.c_str(), text.c_str());
+            return false;
+        }
+        return true;
+    }
+    if (cmd == L"SCROLL") {
+        // SCROLL UP|DOWN 次数 [--to 文字]
+        std::wstring body = rest;
+        std::wstring needle;
+        size_t tp = body.find(L"--to");
+        if (tp != std::wstring::npos) {
+            needle = Trim(body.substr(tp + 4));
+            body = Trim(body.substr(0, tp));
+        }
+        std::wstring dir = body;
+        int n = 3;
+        size_t sp3 = body.find_first_of(L" \t");
+        if (sp3 != std::wstring::npos) {
+            dir = body.substr(0, sp3);
+            int a[1]{ 3 };
+            ParseInts(body.substr(sp3), a, 1);
+            n = a[0] < 1 ? 1 : a[0];
+        }
+        dir = ToUpper(Trim(dir));
+        const int delta = (dir == L"UP") ? 120 : -120;
+
+        POINT p;
+        GetCursorPos(&p);
+        if (!needle.empty()) {
+            // 一边滚一边看，最多滚 n*10 格
+            for (int i = 0; i < n * 10; ++i) {
+                if (ShouldAbort()) return false;
+                WheelAt(p.x, p.y, delta);
+                SleepInterruptible(150);
+                OcrRequest req;
+                OcrResult r = EyeRecognize(req);
+                if (r.ok && !SieveFind(r.lines, needle, 1).empty()) return true;
+            }
+            Say(L"[第 %d 行] 滚动后仍找不到: %ls", lineNo, needle.c_str());
+            return false;
+        }
+        for (int i = 0; i < n; ++i) {
+            if (ShouldAbort()) return false;
+            WheelAt(p.x, p.y, delta);
+            SleepInterruptible(80);
+        }
+        return true;
+    }
+    if (cmd == L"CLEARINPUT") {
+        PressKeyCombo(L"CTRL+A");
+        SleepInterruptible(40);
+        PressKey(VK_DELETE, true);
         return true;
     }
     Say(L"[第 %d 行] 未知命令: %ls", lineNo, cmd.c_str());
